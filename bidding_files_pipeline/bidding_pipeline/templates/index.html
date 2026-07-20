@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>投标文件解析与风险分析平台</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-mark" aria-hidden="true">JW</div>
+    <div>
+      <p class="eyebrow">BIDDING DOCUMENT INTELLIGENCE</p>
+      <h1>投标文件解析与风险分析平台</h1>
+    </div>
+    <span class="environment">内网服务</span>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <span class="section-index">01 / 任务配置</span>
+        <h2>从文件解析到风险报告，一次完成</h2>
+        <p>依次执行 PDF 解析、企业信息爬取、结果入库、openGauss 关联风险分析和报告生成。</p>
+      </div>
+      <div class="hero-stat">
+        <strong>5</strong>
+        <span>个自动化阶段</span>
+      </div>
+    </section>
+
+    <form id="job-form" class="panel task-form">
+      <div class="form-section">
+        <div class="section-heading">
+          <h3>文件来源</h3>
+          <p>上传 ZIP 压缩包，或使用服务器允许目录中的现有文件。</p>
+        </div>
+        <div class="source-switch" role="radiogroup" aria-label="文件来源">
+          <label><input type="radio" name="source_mode" value="upload" checked> 上传压缩包</label>
+          <label><input type="radio" name="source_mode" value="local"> 服务器本地路径</label>
+        </div>
+        <div id="upload-source" class="source-panel">
+          <label class="upload-box" for="archive">
+            <span class="upload-icon">ZIP</span>
+            <strong id="upload-label">选择投标文件压缩包</strong>
+            <small>仅支持 .zip，压缩包内应包含 PDF 文件</small>
+          </label>
+          <input id="archive" name="archive" type="file" accept=".zip,application/zip" hidden>
+        </div>
+        <div id="local-source" class="source-panel hidden">
+          <label for="local-path">服务器目录</label>
+          <input id="local-path" name="local_path" type="text" placeholder="例如：/home/wisdi/projects/bidding_files_utils/bidding_files/huishan">
+          <small id="allowed-roots">正在读取允许目录…</small>
+        </div>
+      </div>
+
+      <div class="form-section split-grid">
+        <div>
+          <div class="section-heading">
+            <h3>文件类别</h3>
+            <p>配置方式与命令行 <code>--include</code> / <code>--exclude</code> 一致。</p>
+          </div>
+          <select id="category-mode" name="category_mode">
+            <option value="all">处理全部类别</option>
+            <option value="include">仅处理所选类别（include）</option>
+            <option value="exclude">排除所选类别（exclude）</option>
+          </select>
+          <div id="category-list" class="category-list" aria-label="文件类别"></div>
+        </div>
+        <div class="run-options">
+          <div class="section-heading">
+            <h3>运行选项</h3>
+            <p>默认复用 OCR 缓存，可按需强制重新识别。</p>
+          </div>
+          <label class="toggle-row">
+            <span><strong>强制重新 OCR</strong><small>忽略已有缓存并重新解析</small></span>
+            <input id="force-ocr" name="force_ocr" type="checkbox">
+          </label>
+        </div>
+      </div>
+
+      <div id="form-error" class="alert hidden" role="alert"></div>
+      <button id="start-button" class="primary-button" type="submit">
+        <span>开始执行完整 Pipeline</span><span aria-hidden="true">→</span>
+      </button>
+    </form>
+
+    <section id="execution" class="execution hidden" aria-live="polite">
+      <div class="execution-header">
+        <div>
+          <span class="section-index">02 / 执行状态</span>
+          <h2 id="stage-title">等待执行</h2>
+        </div>
+        <div class="execution-controls">
+          <button id="retry-button" class="secondary-button" type="button" disabled>重新执行此任务</button>
+          <button id="cancel-button" class="danger-button" type="button" disabled>中止当前任务</button>
+          <span id="status-badge" class="status-badge">等待中</span>
+        </div>
+      </div>
+      <p id="retry-hint" class="retry-hint hidden"></p>
+
+      <div class="progress-card">
+        <div class="progress-meta"><span>整体进度</span><strong id="progress-value">0%</strong></div>
+        <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+        <div class="parallel-progress-grid">
+          <section class="parallel-progress-item" aria-label="PDF 文件解析进度">
+            <div class="progress-meta"><span>PDF 文件解析</span><strong id="pdf-progress-value">0%</strong></div>
+            <div class="progress-track"><div id="pdf-progress-bar" class="progress-bar"></div></div>
+            <p id="pdf-progress-detail" class="progress-detail">等待开始解析</p>
+          </section>
+          <section class="parallel-progress-item" aria-label="企业信息爬取进度">
+            <div class="progress-meta"><span>企业信息爬取</span><strong id="spider-progress-value">0%</strong></div>
+            <div class="progress-track"><div id="spider-progress-bar" class="progress-bar spider-progress-bar"></div></div>
+            <p id="spider-progress-detail" class="progress-detail">等待 PDF 解析结果</p>
+          </section>
+        </div>
+        <ol class="stage-list">
+          <li data-stage="1"><span>1</span>PDF 解析</li>
+          <li data-stage="2"><span>2</span>企业爬虫</li>
+          <li data-stage="3"><span>3</span>结果入库</li>
+          <li data-stage="4"><span>4</span>风险分析</li>
+          <li data-stage="5"><span>5</span>报告生成</li>
+        </ol>
+      </div>
+
+      <div class="artifact-grid">
+        <a id="download-csv" class="artifact-button disabled" href="#" aria-disabled="true"><span>CSV</span><strong>下载解析结果</strong></a>
+        <a id="download-report" class="artifact-button disabled" href="#" aria-disabled="true"><span>PDF</span><strong>下载风险分析报告</strong></a>
+        <a id="download-json" class="artifact-button disabled" href="#" aria-disabled="true"><span>JSON</span><strong>下载风险记录</strong></a>
+        <a id="download-log" class="artifact-button disabled" href="#" aria-disabled="true"><span>LOG</span><strong>下载运行日志</strong></a>
+      </div>
+
+      <div class="log-panel">
+        <div class="log-header"><strong>实时运行日志</strong><span id="job-id"></span></div>
+        <pre id="log-output">任务创建后将在此显示日志。</pre>
+      </div>
+    </section>
+  </main>
+
+  <footer>JWmath · 招投标智能分析 · 风险结果仅供辅助审查</footer>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

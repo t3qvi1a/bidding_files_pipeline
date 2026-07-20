@@ -1,0 +1,37 @@
+扫描 PDF 3053 个，识别 193 个，未识别跳过 2860 个，分类预检失败 0 个，筛选后待处理 15 个；类别：bid_candidates。
+并行处理完成 1/15 个 PDF。
+并行处理完成 2/15 个 PDF。
+并行处理完成 3/15 个 PDF。
+并行处理完成 4/15 个 PDF。
+并行处理完成 5/15 个 PDF。
+并行处理完成 6/15 个 PDF。
+并行处理完成 7/15 个 PDF。
+[0;93m2026-07-15 16:19:16.740614534 [W:onnxruntime:Default, device_discovery.cc:164 DiscoverDevicesForPlatform] GPU device discovery failed: device_discovery.cc:89 ReadFileContents Failed to open file: "/sys/class/drm/card0/device/vendor"[m
+并行处理完成 8/15 个 PDF。
+并行处理完成 9/15 个 PDF。
+并行处理完成 10/15 个 PDF。
+并行处理完成 11/15 个 PDF。
+并行处理完成 12/15 个 PDF。
+并行处理完成 13/15 个 PDF。
+[0;93m2026-07-15 16:19:19.470285645 [W:onnxruntime:Default, device_discovery.cc:164 DiscoverDevicesForPlatform] GPU device discovery failed: device_discovery.cc:89 ReadFileContents Failed to open file: "/sys/class/drm/card0/device/vendor"[m
+并行处理完成 14/15 个 PDF。
+并行处理完成 15/15 个 PDF。
+[#-------------------] 1/15 (7%) 完成 1/15 | 类别 bid_candidates | 页数 3 | OCR 页 无 | 记录 15 | 状态 成功
+[###-----------------] 2/15 (13%) 完成 2/15 | 类别 bid_candidates | 页数 2 | OCR 页 无 | 记录 14 | 状态 成功
+[####----------------] 3/15 (20%) 完成 3/15 | 类别 bid_candidates | 页数 2 | OCR 页 无 | 记录 13 | 状态 成功
+[#####---------------] 4/15 (27%) 完成 4/15 | 类别 bid_candidates | 页数 1 | OCR 页 无 | 记录 1 | 状态 待复核
+[#######-------------] 5/15 (33%) 完成 5/15 | 类别 bid_candidates | 页数 2 | OCR 页 无 | 记录 13 | 状态 成功
+[########------------] 6/15 (40%) 完成 6/15 | 类别 bid_candidates | 页数 2 | OCR 页 无 | 记录 10 | 状态 成功
+[#########-----------] 7/15 (47%) 完成 7/15 | 类别 bid_candidates | 页数 2 | OCR 页 [2] | 记录 12 | 状态 成功
+[###########---------] 8/15 (53%) 完成 8/15 | 类别 bid_candidates | 页数 2 | OCR 页 无 | 记录 5 | 状态 成功
+[############--------] 9/15 (60%) 完成 9/15 | 类别 bid_candidates | 页数 2 | OCR 页 无 | 记录 4 | 状态 成功
+[#############-------] 10/15 (67%) 完成 10/15 | 类别 bid_candidates | 页数 2 | OCR 页 无 | 记录 6 | 状态 成功
+[###############-----] 11/15 (73%) 完成 11/15 | 类别 bid_candidates | 页数 2 | OCR 页 无 | 记录 17 | 状态 成功
+[################----] 12/15 (80%) 完成 12/15 | 类别 bid_candidates | 页数 2 | OCR 页 无 | 记录 9 | 状态 成功
+[#################---] 13/15 (87%) 完成 13/15 | 类别 bid_candidates | 页数 2 | OCR 页 无 | 记录 12 | 状态 成功
+[###################-] 14/15 (93%) 完成 14/15 | 类别 bid_candidates | 页数 2 | OCR 页 无 | 记录 12 | 状态 成功
+[####################] 15/15 (100%) 完成 15/15 | 类别 bid_candidates | 页数 2 | OCR 页 [1, 2] | 记录 9 | 状态 成功
+PDF 解析完成，正在生成分类 CSV、最终汇总和复核清单。
+结果已写入：/home/wisdi/projects/bidding_files_utils/output/test_mp_smoke
+处理完成：扫描 3053 个，识别 193 个，处理 15 个，记录 152 条，待复核 1 条，失败 0 个。
+结果目录：/home/wisdi/projects/bidding_files_utils/output/test_mp_smoke

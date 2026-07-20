@@ -1,0 +1,80 @@
+{
+  "runId": "d2cc7401-164f-4a4d-8593-364146d92fba",
+  "config": {
+    "inputDir": "/home/wisdi/projects/bidding_files_pipeline",
+    "outputDir": "/home/wisdi/projects/bidding_files_pipeline/.smoke-output",
+    "ocrSource": "/home/wisdi/projects/biding_files_ocr_strategies",
+    "workers": 2,
+    "dpi": 300,
+    "archiveScanDpi": 150,
+    "ocrThreshold": 0.8,
+    "forceOcr": false,
+    "category": null,
+    "include": [],
+    "exclude": [],
+    "database": {
+      "host": "192.168.1.210",
+      "port": 15400,
+      "database": "big_data",
+      "username": "jwmath",
+      "schema": "dwd",
+      "table": "dwd_bid_extraction_results"
+    },
+    "spiderResultDatabase": "big_data",
+    "spider": {
+      "baseUrl": "http://192.168.1.166:9081",
+      "submitMode": "single",
+      "timeoutSeconds": 20,
+      "pollIntervalSeconds": 5.0,
+      "maxPollSeconds": 180,
+      "retryDelays": [
+        5.0,
+        15.0
+      ]
+    },
+    "skipSpider": false,
+    "dryRun": true
+  },
+  "ocrSummary": {
+    "开始时间": "2026-07-16T10:11:34+08:00",
+    "结束时间": "2026-07-16T10:11:34+08:00",
+    "输入目录": "/home/wisdi/projects/bidding_files_pipeline",
+    "输出目录": "/home/wisdi/projects/bidding_files_pipeline/.smoke-output",
+    "扫描PDF总数": 0,
+    "已识别文件数": 0,
+    "未识别跳过文件数": 0,
+    "筛选排除文件数": 0,
+    "分类预检失败文件数": 0,
+    "各类别识别文件数": {
+      "tender_cover": 0,
+      "bid_evaluation_report": 0,
+      "bid_candidates": 0,
+      "award_notice": 0,
+      "bid_announcement": 0,
+      "bid_list": 0,
+      "archive_info": 0
+    },
+    "本次处理类别": [
+      "tender_cover",
+      "bid_evaluation_report",
+      "bid_candidates",
+      "award_notice",
+      "bid_announcement",
+      "bid_list",
+      "archive_info"
+    ],
+    "并行进程数": 2,
+    "并行模式": true,
+    "文件总数": 0,
+    "记录总数": 0,
+    "待复核记录数": 0,
+    "失败文件数": 0,
+    "分类预检错误": [],
+    "文件": []
+  },
+  "finalRecordCount": 0,
+  "spiderStatusCounts": {},
+  "spiderResultCount": 0,
+  "persistence": null,
+  "error": ""
+}

@@ -1,0 +1,15 @@
+[Unit]
+Description=Bidding Files Pipeline Web Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/wisdi/projects/bidding_files_utils/bidding_files_pipeline
+EnvironmentFile=/home/wisdi/projects/bidding_files_utils/bidding_files_pipeline/.env
+ExecStart=/home/wisdi/miniconda3/envs/bidding-ocr/bin/python -m bidding_pipeline serve --host 0.0.0.0 --port 8096
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,38 @@
+{
+  "jobId": "13972da4c6484bfdb10f8464fcea67e7",
+  "inputDir": "/home/wisdi/projects/bidding_files_utils/bidding_files",
+  "outputDir": "/home/wisdi/projects/bidding_files_utils/bidding_files_pipeline/web_runs/13972da4c6484bfdb10f8464fcea67e7/output",
+  "status": "completed",
+  "stage": "流程完成，存在爬虫警告",
+  "progress": 100,
+  "pdfProgress": {
+    "completed": 0,
+    "total": 0,
+    "percent": 0
+  },
+  "spiderProgress": {
+    "discovered": 0,
+    "queued": 0,
+    "running": 0,
+    "completed": 0,
+    "failed": 0,
+    "skipped": 0,
+    "phase": "waiting_for_companies"
+  },
+  "artifacts": {
+    "csv": "/home/wisdi/projects/bidding_files_utils/bidding_files_pipeline/web_runs/13972da4c6484bfdb10f8464fcea67e7/output/final.csv",
+    "risk_json": "/home/wisdi/projects/bidding_files_utils/bidding_files_pipeline/web_runs/13972da4c6484bfdb10f8464fcea67e7/output/risk_records.json",
+    "risk_report": "/home/wisdi/projects/bidding_files_utils/bidding_files_pipeline/web_runs/13972da4c6484bfdb10f8464fcea67e7/output/risk_report.pdf",
+    "log": "/home/wisdi/projects/bidding_files_utils/bidding_files_pipeline/web_runs/13972da4c6484bfdb10f8464fcea67e7/output/pipeline.log"
+  },
+  "error": "",
+  "createdAt": "2026-07-17T16:32:01.824679+08:00",
+  "completedAt": "2026-07-17T16:32:19.261580+08:00",
+  "sourceMode": "local",
+  "categoryMode": "include",
+  "categories": [
+    "bid_candidates"
+  ],
+  "forceOcr": false,
+  "inputSummary": "服务器目录：bidding_files"
+}

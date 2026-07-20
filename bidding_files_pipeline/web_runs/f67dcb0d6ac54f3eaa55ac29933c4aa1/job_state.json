@@ -1,0 +1,34 @@
+{
+  "jobId": "f67dcb0d6ac54f3eaa55ac29933c4aa1",
+  "inputDir": ".",
+  "outputDir": "/home/wisdi/projects/bidding_files_utils/bidding_files_pipeline/web_runs/f67dcb0d6ac54f3eaa55ac29933c4aa1/output",
+  "status": "interrupted",
+  "stage": "历史任务未完整结束",
+  "progress": 38,
+  "pdfProgress": {
+    "completed": 0,
+    "total": 0,
+    "percent": 0
+  },
+  "spiderProgress": {
+    "discovered": 0,
+    "queued": 0,
+    "running": 0,
+    "completed": 0,
+    "failed": 0,
+    "skipped": 0,
+    "phase": "waiting_for_companies"
+  },
+  "artifacts": {
+    "csv": "/home/wisdi/projects/bidding_files_utils/bidding_files_pipeline/web_runs/f67dcb0d6ac54f3eaa55ac29933c4aa1/output/final.csv",
+    "log": "/home/wisdi/projects/bidding_files_utils/bidding_files_pipeline/web_runs/f67dcb0d6ac54f3eaa55ac29933c4aa1/output/pipeline.log"
+  },
+  "error": "旧版任务未找到完成清单。",
+  "createdAt": "2026-07-16T17:22:50.833649+08:00",
+  "completedAt": "",
+  "sourceMode": "",
+  "categoryMode": "all",
+  "categories": [],
+  "forceOcr": false,
+  "inputSummary": ""
+}

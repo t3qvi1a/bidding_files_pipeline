@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bidding-files-pipeline"
+version = "0.1.0"
+description = "Command-line pipeline for bidding PDF OCR, company crawling and openGauss persistence."
+requires-python = ">=3.10"
+dependencies = [
+  "psycopg2-binary>=2.9,<3.0",
+  "fastapi>=0.115,<1.0",
+  "uvicorn>=0.34,<1.0",
+  "python-multipart>=0.0.20,<1.0",
+  "reportlab>=4.0,<5.0",
+  "pypdf>=5.0,<7.0",
+]
+
+[tool.setuptools]
+packages = ["bidding_pipeline"]
+
+[tool.setuptools.package-data]
+bidding_pipeline = ["templates/*.html", "static/*.css", "static/*.js"]

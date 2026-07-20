@@ -1,0 +1,10 @@
+# PDF reader
+pypdf>=5.0,<7.0
+pypdfium2>=5.0,<6.0
+
+# Local Chinese OCR.
+rapidocr-onnxruntime>=1.4,<2.0
+
+# Image dependency
+Pillow>=10.0
+numpy>=1.26,<3.0
