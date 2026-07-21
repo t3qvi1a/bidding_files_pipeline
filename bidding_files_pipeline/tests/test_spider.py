@@ -17,9 +17,11 @@ from bidding_pipeline.records import ExtractionResult
 from bidding_pipeline.spider import (
     CrawlDispatcher,
     HttpResult,
+    RunProgress,
     SpiderClient,
     SpiderConfig,
     SpiderTaskResult,
+    consolidate_spider_results,
 )
 
 
@@ -162,6 +164,161 @@ class SpiderTests(unittest.TestCase):
         self.assertEqual([(item.company_name, item.status, item.company_type) for item in results], [("企业A", "existing", "root"), ("关联企业B", "success", "related")])
         self.assertEqual(snapshots[-1].related_total, 1)
         self.assertEqual(snapshots[-1].expansion_status, "COMPLETED")
+
+    def test_completed_expansion_waits_until_all_entities_are_terminal(self) -> None:
+        """
+        【方法功能】验证扩展状态完成但关联企业仍在运行时不会提前结束轮询。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 09:30:00
+        """
+        client = SpiderClient(SpiderConfig("http://spider", poll_interval_seconds=0))
+        submit = HttpResult(200, "", {"data": {"runId": "run-1", "expansionStatus": "WAITING"}})
+        run_status = HttpResult(
+            200,
+            "",
+            {"data": {"expansionStatus": "COMPLETED", "roots": [{"companyName": "企业A", "queryStatus": "SUCCESS"}], "totalNodes": 2}},
+        )
+        running_queue = HttpResult(
+            200,
+            "",
+            {"data": {"total": 1, "items": [{"companyId": "related-1", "companyName": "关联企业B", "depth": 1, "queryStatus": "RUNNING"}]}},
+        )
+        completed_queue = HttpResult(
+            200,
+            "",
+            {"data": {"total": 1, "items": [{"companyId": "related-1", "companyName": "关联企业B", "depth": 1, "queryStatus": "SUCCESS"}]}},
+        )
+        with patch.object(client, "_request", side_effect=[submit, run_status, running_queue, run_status, completed_queue]) as request_mock:
+            results = client.crawl_document("a.pdf", ["企业A"])
+
+        self.assertEqual(request_mock.call_count, 5)
+        self.assertEqual([item.status for item in results], ["success", "success"])
+
+    def test_timeout_preserves_terminal_related_results_and_audit_status(self) -> None:
+        """
+        【方法功能】验证扩展超时只结束未完成企业，并保留已成功关联企业及原始扩展状态。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 09:30:00
+        """
+        client = SpiderClient(SpiderConfig("http://spider"))
+        progress = RunProgress(
+            "run-1",
+            1,
+            0,
+            0,
+            0,
+            1,
+            1,
+            0,
+            0,
+            "RUNNING",
+            (
+                SpiderTaskResult("a.pdf", "企业A", "企业A", "running", "", run_id="run-1", raw_status="RUNNING"),
+                SpiderTaskResult("a.pdf", "关联企业B", "企业A", "success", "", run_id="run-1", company_type="related", raw_status="SUCCESS"),
+            ),
+        )
+
+        results = client._finalize_run_results(progress, 1, 3, "timeout", "relation_expansion_timeout")
+
+        self.assertEqual([item.status for item in results], ["timeout", "success"])
+        self.assertEqual(results[0].expansion_status, "FAILED")
+        self.assertEqual(results[0].to_dict()["auditResults"][0]["expansionStatus"], "RUNNING")
+
+    def test_related_deduplication_uses_company_id_and_merges_root_sources(self) -> None:
+        """
+        【方法功能】验证跨根企业发现的关联企业按稳定 ID 去重并保留全部来源和审计记录。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 09:30:00
+        """
+        results = consolidate_spider_results(
+            [
+                SpiderTaskResult("a.pdf", "关联企业B", "根企业A", "success", "", run_id="run-a", company_type="related", raw_status="SUCCESS", related_sources=("根企业A",), company_id="company-1"),
+                SpiderTaskResult("b.pdf", "关联企业乙", "根企业B", "existing", "", run_id="run-b", company_type="related", raw_status="FAILED", has_data=True, related_sources=("根企业B",), company_id="company-1"),
+            ]
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].status, "existing")
+        self.assertEqual(results[0].related_sources, ("根企业A", "根企业B"))
+        self.assertEqual(len(results[0].to_dict()["auditResults"]), 2)
+
+    def test_root_rows_are_matched_by_company_name_instead_of_response_order(self) -> None:
+        """
+        【方法功能】验证服务端重排根企业数组时仍按规范化企业名称匹配状态。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 09:30:00
+        """
+        client = SpiderClient(SpiderConfig("http://spider"))
+        progress = client._build_run_progress(
+            "a.pdf",
+            ["企业A", "企业B"],
+            "企业A,企业B",
+            "run-1",
+            {
+                "expansionStatus": "RUNNING",
+                "roots": [
+                    {"companyName": "企业B", "queryStatus": "FAILED"},
+                    {"companyName": "企业A", "queryStatus": "SUCCESS"},
+                ],
+            },
+            [],
+        )
+
+        self.assertEqual([(item.company_name, item.status) for item in progress.entities], [("企业A", "success"), ("企业B", "failed")])
+
+    def test_real_queue_fields_preserve_reuse_status_ids_errors_and_sources(self) -> None:
+        """
+        【方法功能】验证生产队列双状态、entId、rootCompany 和 errorSummary 字段可完整解析。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 09:30:00
+        """
+        client = SpiderClient(SpiderConfig("http://spider"))
+        progress = client._build_run_progress(
+            "a.pdf",
+            ["根企业A"],
+            "根企业A",
+            "run-1",
+            {
+                "status": "FAILED",
+                "rootStatus": "FAILED",
+                "roots": [{"companyName": "根企业A", "status": "FAILED"}],
+                "totalNodes": 2,
+            },
+            [
+                {
+                    "companyName": "根企业A（规范名）",
+                    "entId": "root-a.html",
+                    "rootCompany": "根企业A",
+                    "depth": 0,
+                    "source": "CURRENT_RUN_REUSE",
+                    "traversalStatus": "EXPANDED",
+                    "collectionStatus": "COMPLETED",
+                },
+                {
+                    "companyName": "关联企业B",
+                    "entId": "related-b.html",
+                    "rootCompany": "根企业A",
+                    "parentCompany": "根企业A（规范名）",
+                    "depth": 1,
+                    "source": "DATABASE_REUSE",
+                    "traversalStatus": "BLOCKED",
+                    "collectionStatus": "FAILED",
+                    "errorSummary": "额度已耗尽",
+                },
+            ],
+        )
+
+        root, related = progress.entities
+        self.assertEqual((root.status, root.company_id, root.has_data), ("existing", "root-a.html", True))
+        self.assertEqual((related.status, related.company_id, related.has_data), ("existing", "related-b.html", True))
+        self.assertEqual(related.related_sources, ("根企业A", "根企业A（规范名）"))
+        self.assertEqual(related.message, "额度已耗尽")
+        self.assertIn("collectionStatus=FAILED", related.raw_status)
 
     def test_retries_server_error_before_success(self) -> None:
         """

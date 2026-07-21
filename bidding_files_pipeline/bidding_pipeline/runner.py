@@ -240,6 +240,70 @@ def pipeline_config_to_dict(config: PipelineConfig) -> dict[str, Any]:
     }
 
 
+def build_spider_statistics(spider_results: list[SpiderTaskResult]) -> dict[str, dict[str, int]]:
+    """
+    【函数功能】按根企业、关联企业和整体生成爬虫状态统计。
+    :param spider_results: list[SpiderTaskResult]，已按企业标识去重的爬虫结果
+    :return: dict[str, dict[str, int]]，三组总数、成功、失败和已有数据统计
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 09:30:00
+    Example: build_spider_statistics([])
+    """
+    failure_statuses = {"failed", "timeout", "empty_result"}
+
+    def summarize(items: list[SpiderTaskResult]) -> dict[str, int]:
+        """
+        【函数功能】汇总单组企业的展示状态计数。
+        :param items: list[SpiderTaskResult]，同一企业类型的结果
+        :return: dict[str, int]，总数、成功、失败和已有数据数量
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 09:30:00
+        """
+        return {
+            "total": len(items),
+            "success": sum(item.status == "success" for item in items),
+            "failed": sum(item.status in failure_statuses for item in items),
+            "existing": sum(item.status == "existing" for item in items),
+        }
+
+    roots = [item for item in spider_results if item.company_type == "root"]
+    related = [item for item in spider_results if item.company_type == "related"]
+    return {"root": summarize(roots), "related": summarize(related), "overall": summarize(spider_results)}
+
+
+def build_crawl_audit(run_id: str, spider_results: list[SpiderTaskResult]) -> dict[str, Any]:
+    """
+    【函数功能】生成包含服务 runId、扩展状态、分层统计和企业明细的爬虫审计结果。
+    :param run_id: str，Pipeline 运行标识
+    :param spider_results: list[SpiderTaskResult]，企业爬虫结果
+    :return: dict[str, Any]，crawl_results.json 完整内容
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 09:30:00
+    Example: build_crawl_audit("run", [])
+    """
+    service_run_ids = {item.run_id for item in spider_results if item.run_id}
+    expansion_statuses: dict[str, str] = {
+        item.run_id: item.expansion_status
+        for item in spider_results
+        if item.run_id and item.expansion_status
+    }
+    for item in spider_results:
+        for audit in item.audit_results:
+            audit_run_id = str(audit.get("runId") or "")
+            audit_expansion_status = str(audit.get("expansionStatus") or "")
+            if audit_run_id:
+                service_run_ids.add(audit_run_id)
+                if audit_expansion_status:
+                    expansion_statuses[audit_run_id] = audit_expansion_status
+    return {
+        "runId": run_id,
+        "serviceRunIds": sorted(service_run_ids),
+        "expansionStatuses": expansion_statuses,
+        "statistics": build_spider_statistics(spider_results),
+        "results": [item.to_dict() for item in spider_results],
+    }
+
+
 def build_manifest(
     run_id: str,
     config: PipelineConfig,
@@ -273,6 +337,7 @@ def build_manifest(
         status_counts[result.status] = status_counts.get(result.status, 0) + 1
         type_counts = company_type_counts.setdefault(result.company_type, {})
         type_counts[result.status] = type_counts.get(result.status, 0) + 1
+    crawl_audit = build_crawl_audit(run_id, spider_results)
     return {
         "runId": run_id,
         "config": pipeline_config_to_dict(config),
@@ -280,6 +345,9 @@ def build_manifest(
         "finalRecordCount": final_record_count,
         "spiderStatusCounts": status_counts,
         "spiderCompanyTypeStatusCounts": company_type_counts,
+        "spiderStatistics": build_spider_statistics(spider_results),
+        "spiderRunIds": crawl_audit["serviceRunIds"],
+        "spiderExpansionStatuses": crawl_audit["expansionStatuses"],
         "spiderResultCount": len(spider_results),
         "persistence": (
             {
@@ -394,7 +462,7 @@ def run_pipeline(
         ocr_summary = summary.to_dict()
         progress_callback("[阶段 2/5] PDF 解析完成，正在等待企业爬虫任务收尾。")
         spider_results = dispatcher.wait()
-        write_json(output_dir / "crawl_results.json", {"runId": run_id, "results": [item.to_dict() for item in spider_results]})
+        write_json(output_dir / "crawl_results.json", build_crawl_audit(run_id, spider_results))
         final_records = read_final_records(output_dir / "final.csv")
         final_record_count = len(final_records)
         if config.dry_run:
@@ -458,7 +526,8 @@ def run_pipeline(
         return outcome
     except Exception as exc:
         try:
-            spider_results.extend(dispatcher.wait())
+            spider_results = dispatcher.wait()
+            write_json(output_dir / "crawl_results.json", build_crawl_audit(run_id, spider_results))
             write_json(
                 output_dir / "run_manifest.json",
                 build_manifest(

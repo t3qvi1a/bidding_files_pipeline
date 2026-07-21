@@ -348,6 +348,8 @@ function renderSpiderProgress(progress) {
   const running = Math.max(0, Number(current.running) || 0);
   const failed = Math.max(0, Number(current.failed) || 0);
   const percent = discovered > 0 ? Math.floor(completed * 100 / discovered) : 0;
+  const rootPercent = rootTotal > 0 ? Math.floor(rootFinished * 100 / rootTotal) : 0;
+  const relatedPercent = relatedTotal > 0 ? Math.floor(relatedFinished * 100 / relatedTotal) : 0;
   const phase = current.phase || "waiting_for_companies";
   let detail = `已完成 ${completed} / 已发现 ${discovered} 家企业 · 处理中 ${running} · 失败 ${failed}`;
   if (discovered === 0 && phase === "waiting_for_companies") {
@@ -358,7 +360,11 @@ function renderSpiderProgress(progress) {
   byId("spider-progress-value").textContent = `${percent}%`;
   byId("spider-progress-bar").style.width = `${percent}%`;
   byId("spider-progress-detail").textContent = detail;
+  byId("root-progress-value").textContent = `${rootPercent}%`;
+  byId("root-progress-bar").style.width = `${rootPercent}%`;
   byId("root-progress-detail").textContent = `根企业：${rootTotal} 家｜已完成：${Number(root.success) || 0}｜失败：${Number(root.failed) || 0}｜数据已存在：${Number(root.existing) || 0}`;
+  byId("related-progress-value").textContent = `${relatedPercent}%`;
+  byId("related-progress-bar").style.width = `${relatedPercent}%`;
   byId("related-progress-detail").textContent = `已发现关联企业：${relatedTotal} 家｜已完成：${Number(related.success) || 0}｜失败：${Number(related.failed) || 0}｜数据已存在：${Number(related.existing) || 0}`;
   byId("expansion-status-detail").textContent = `关系扩展状态：${current.expansionStatus || "WAITING"}`;
 }

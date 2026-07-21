@@ -82,6 +82,23 @@ class WebSecurityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     extract_zip_safely(archive_path, root / "input")
 
+    def test_index_contains_root_related_and_overall_spider_progress_bars(self) -> None:
+        """
+        【方法功能】验证首页同时提供根企业、关联企业和企业整体三条进度条。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 09:30:00
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app(Path(temp_dir))
+            with TestClient(app) as client:
+                response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="spider-progress-bar"', response.text)
+        self.assertIn('id="root-progress-bar"', response.text)
+        self.assertIn('id="related-progress-bar"', response.text)
+
 
 class WebJobStateTests(unittest.TestCase):
     """

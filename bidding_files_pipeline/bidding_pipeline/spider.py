@@ -23,6 +23,8 @@ from .records import extract_company_names, normalize_text
 SUCCESS_STATUSES = {"success", "succeeded", "finished", "finish", "completed", "done", "ok"}
 FAILED_STATUSES = {"failed", "fail", "error", "exception", "canceled", "cancelled"}
 RUNNING_STATUSES = {"running", "pending", "processing", "started", "queued", "doing", "waiting"}
+TERMINAL_ENTITY_STATUSES = {"success", "failed", "existing"}
+TERMINAL_EXPANSION_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 Verifier = Callable[[str], VerificationResult]
 SpiderProgressCallback = Callable[[dict[str, Any]], None]
 
@@ -89,6 +91,9 @@ class SpiderTaskResult:
         poll_count: int，状态轮询次数
         database_rows: int，回查到的企业信息行数
         effective_fields: dict[str, str]，回查命中的非空字段样例
+        company_id: str，服务端稳定企业标识
+        expansion_status: str，结果生成时的关系扩展状态
+        audit_results: tuple[dict[str, Any], ...]，合并去重前的服务端审计记录
     :Author: gexinyan
     :CreateTime: 2026-07-16 10:00:00
     """
@@ -107,6 +112,9 @@ class SpiderTaskResult:
     raw_status: str = ""
     has_data: bool = False
     related_sources: tuple[str, ...] = ()
+    company_id: str = ""
+    expansion_status: str = ""
+    audit_results: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """
@@ -115,6 +123,17 @@ class SpiderTaskResult:
         :Author: gexinyan
         :CreateTime: 2026-07-16 10:00:00
         """
+        audit_results = self.audit_results or (
+            {
+                "runId": self.run_id,
+                "sourcePdf": self.source_pdf,
+                "requestKeyword": self.request_keyword,
+                "queryStatus": self.raw_status,
+                "errorMessage": self.message,
+                "hasData": self.has_data,
+                "expansionStatus": self.expansion_status,
+            },
+        )
         return {
             "sourcePdf": self.source_pdf,
             "companyName": self.company_name,
@@ -126,10 +145,14 @@ class SpiderTaskResult:
             "databaseRows": self.database_rows,
             "effectiveFields": self.effective_fields,
             "runId": self.run_id,
+            "companyId": self.company_id,
             "companyType": self.company_type,
             "rawStatus": self.raw_status,
+            "queryStatus": self.raw_status,
             "hasData": self.has_data,
             "relatedSources": list(self.related_sources),
+            "expansionStatus": self.expansion_status,
+            "auditResults": list(audit_results),
         }
 
 
@@ -199,10 +222,10 @@ class CrawlProgress:
     related_existing: int = 0
     expansion_status: str = "WAITING"
 
-    def to_dict(self) -> dict[str, int | str]:
+    def to_dict(self) -> dict[str, Any]:
         """
         【方法功能】转换为可经由进程队列传输的结构化进度数据。
-        :return: dict[str, int | str]，爬虫进度快照
+        :return: dict[str, Any]，包含根企业和关联企业嵌套统计的爬虫进度快照
         :Author: gexinyan
         :CreateTime: 2026-07-17 10:30:00
         """
@@ -360,6 +383,80 @@ def normalize_entity_status(raw_status: Any, has_data: bool) -> str:
     return "waiting"
 
 
+def normalize_boolean(value: Any) -> bool:
+    """
+    【函数功能】将服务端布尔值安全转换为 Python 布尔值，避免字符串 false 被误判为真。
+    :param value: Any，布尔值、数字或字符串
+    :return: bool，标准布尔值
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 09:30:00
+    Example: normalize_boolean("false")
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return normalize_text(value).casefold() in {"1", "true", "yes", "y", "是"}
+
+
+def entity_error_message(value: dict[str, Any]) -> str:
+    """
+    【函数功能】从不同版本的服务端企业对象中提取错误信息。
+    :param value: dict[str, Any]，根企业或队列节点对象
+    :return: str，规范化错误信息
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 09:30:00
+    Example: entity_error_message({"errorMessage": "timeout"})
+    """
+    return normalize_text(
+        value.get("errorMessage")
+        or value.get("error")
+        or value.get("errorSummary")
+        or value.get("failureReason")
+        or value.get("message")
+        or value.get("msg")
+    )
+
+
+def queue_item_raw_status(value: dict[str, Any]) -> str:
+    """
+    【函数功能】兼容队列节点的单状态和遍历、采集双状态字段并保留原始审计值。
+    :param value: dict[str, Any]，关联扩展队列节点
+    :return: str，可用于标准化和审计的原始状态文本
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 09:30:00
+    Example: queue_item_raw_status({"traversalStatus": "EXPANDED", "collectionStatus": "COMPLETED"})
+    """
+    direct_status = normalize_text(value.get("queryStatus") or value.get("status"))
+    if direct_status:
+        return direct_status
+    parts = [
+        f"traversalStatus={normalize_text(value.get('traversalStatus'))}"
+        if normalize_text(value.get("traversalStatus"))
+        else "",
+        f"collectionStatus={normalize_text(value.get('collectionStatus'))}"
+        if normalize_text(value.get("collectionStatus"))
+        else "",
+    ]
+    return "; ".join(part for part in parts if part)
+
+
+def queue_item_has_data(value: dict[str, Any]) -> bool:
+    """
+    【函数功能】识别队列节点显式 hasData 或服务端数据库复用来源。
+    :param value: dict[str, Any]，关联扩展队列节点
+    :return: bool，节点已有可复用企业数据时返回 True
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 09:30:00
+    Example: queue_item_has_data({"source": "DATABASE_REUSE"})
+    """
+    source = normalize_text(value.get("source")).upper()
+    return normalize_boolean(value.get("hasData", False)) or source in {
+        "DATABASE_REUSE",
+        "CURRENT_RUN_REUSE",
+    }
+
+
 def response_data(result: HttpResult) -> dict[str, Any]:
     """
     【函数功能】提取爬虫 HTTP 响应中 data 字段的字典内容。
@@ -387,9 +484,115 @@ def _status_counts(items: Iterable[SpiderTaskResult]) -> dict[str, int]:
     """
     counts = {"success": 0, "failed": 0, "existing": 0}
     for item in items:
-        if item.status in counts:
+        if item.status in {"timeout", "empty_result"}:
+            counts["failed"] += 1
+        elif item.status in counts:
             counts[item.status] += 1
     return counts
+
+
+def _result_audits(result: SpiderTaskResult) -> tuple[dict[str, Any], ...]:
+    """
+    【函数功能】生成企业结果的完整审计记录，供跨根企业去重时合并。
+    :param result: SpiderTaskResult，单次服务端企业结果
+    :return: tuple[dict[str, Any], ...]，至少包含一条审计记录
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 09:30:00
+    Example: _result_audits(SpiderTaskResult("a.pdf", "企业A", "企业A", "success", ""))
+    """
+    if result.audit_results:
+        return result.audit_results
+    return (
+        {
+            "runId": result.run_id,
+            "sourcePdf": result.source_pdf,
+            "requestKeyword": result.request_keyword,
+            "queryStatus": result.raw_status,
+            "errorMessage": result.message,
+            "hasData": result.has_data,
+            "expansionStatus": result.expansion_status,
+        },
+    )
+
+
+def _merge_spider_results(current: SpiderTaskResult, incoming: SpiderTaskResult) -> SpiderTaskResult:
+    """
+    【函数功能】合并同一企业的多根来源结果，并完整保留每次服务调用审计信息。
+    :param current: SpiderTaskResult，已聚合结果
+    :param incoming: SpiderTaskResult，新发现的重复企业结果
+    :return: SpiderTaskResult，合并后的规范化结果
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 09:30:00
+    Example: _merge_spider_results(current, incoming)
+    """
+    status_priority = {
+        "existing": 6,
+        "success": 5,
+        "failed": 4,
+        "timeout": 3,
+        "empty_result": 2,
+        "running": 1,
+        "waiting": 0,
+    }
+    preferred = incoming if status_priority.get(incoming.status, -1) > status_priority.get(current.status, -1) else current
+    messages = [message for message in (current.message, incoming.message) if message]
+    related_sources = tuple(sorted(set(current.related_sources) | set(incoming.related_sources)))
+    audit_results = _result_audits(current) + tuple(
+        audit for audit in _result_audits(incoming) if audit not in _result_audits(current)
+    )
+    return replace(
+        preferred,
+        message="; ".join(dict.fromkeys(messages)),
+        attempts=current.attempts + incoming.attempts,
+        poll_count=current.poll_count + incoming.poll_count,
+        database_rows=max(current.database_rows, incoming.database_rows),
+        effective_fields=preferred.effective_fields or current.effective_fields or incoming.effective_fields,
+        run_id=current.run_id or incoming.run_id,
+        raw_status=preferred.raw_status or current.raw_status or incoming.raw_status,
+        has_data=current.has_data or incoming.has_data,
+        related_sources=related_sources,
+        company_id=current.company_id or incoming.company_id,
+        expansion_status=preferred.expansion_status or current.expansion_status or incoming.expansion_status,
+        audit_results=audit_results,
+    )
+
+
+def consolidate_spider_results(results: Iterable[SpiderTaskResult]) -> list[SpiderTaskResult]:
+    """
+    【函数功能】按企业类型优先使用稳定企业 ID、缺失时使用规范化名称去重并合并来源。
+    :param results: Iterable[SpiderTaskResult]，待聚合企业结果
+    :return: list[SpiderTaskResult]，保持首次出现顺序的去重结果
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 09:30:00
+    Example: consolidate_spider_results(results)
+    """
+    consolidated: list[SpiderTaskResult] = []
+    id_indexes: dict[tuple[str, str], int] = {}
+    name_indexes: dict[tuple[str, str], int] = {}
+    for result in results:
+        company_type = result.company_type or "root"
+        company_id = normalize_text(result.company_id).casefold()
+        company_name = normalize_text(result.company_name).casefold()
+        index = id_indexes.get((company_type, company_id)) if company_id else None
+        if index is None and company_name:
+            name_index = name_indexes.get((company_type, company_name))
+            if not company_id:
+                index = name_index
+            elif name_index is not None and not consolidated[name_index].company_id:
+                index = name_index
+        if index is None:
+            index = len(consolidated)
+            consolidated.append(result)
+        else:
+            consolidated[index] = _merge_spider_results(consolidated[index], result)
+        merged = consolidated[index]
+        merged_id = normalize_text(merged.company_id).casefold()
+        merged_name = normalize_text(merged.company_name).casefold()
+        if merged_id:
+            id_indexes[(company_type, merged_id)] = index
+        if merged_name:
+            name_indexes[(company_type, merged_name)] = index
+    return consolidated
 
 
 class SpiderClient:
@@ -514,6 +717,14 @@ class SpiderClient:
             response, _ = self._request_with_retry(self._run_url(run_id), "GET", None)
             poll_count += 1
             if not is_success_response(response):
+                if latest is not None:
+                    return self._finalize_run_results(
+                        latest,
+                        attempts,
+                        poll_count,
+                        unresolved_status="failed",
+                        unresolved_message=response.error or truncate_message(response.text) or f"run_status_http_{response.status_code}",
+                    )
                 return [
                     SpiderTaskResult(
                         source_pdf, name, keyword, "failed",
@@ -526,21 +737,27 @@ class SpiderClient:
             queue_items = self._read_run_queue(run_id)
             latest = self._build_run_progress(source_pdf, root_names, keyword, run_id, data, queue_items)
             self._emit_run_progress(latest)
-            if latest.expansion_status in {"COMPLETED", "FAILED", "CANCELLED"}:
+            if latest.expansion_status in {"FAILED", "CANCELLED"}:
+                return self._finalize_run_results(
+                    latest,
+                    attempts,
+                    poll_count,
+                    unresolved_status="failed",
+                    unresolved_message=f"relation_expansion_{latest.expansion_status.casefold()}",
+                )
+            if latest.expansion_status == "COMPLETED" and self._run_entities_terminal(latest):
                 return self._finalize_run_results(latest, attempts, poll_count)
             if self.monotonic() + self.config.poll_interval_seconds > deadline:
                 break
             self.sleep(self.config.poll_interval_seconds)
         if latest is not None:
-            timed_out = [
-                replace(item, status="timeout", message="relation_expansion_timeout", attempts=attempts, poll_count=poll_count)
-                for item in latest.entities
-                if item.company_type == "root"
-            ]
-            return timed_out or [
-                SpiderTaskResult(source_pdf, name, keyword, "timeout", "relation_expansion_timeout", attempts, poll_count, run_id=run_id, company_type="root")
-                for name in root_names
-            ]
+            return self._finalize_run_results(
+                latest,
+                attempts,
+                poll_count,
+                unresolved_status="timeout",
+                unresolved_message="relation_expansion_timeout",
+            )
         return [
             SpiderTaskResult(source_pdf, name, keyword, "timeout", "relation_expansion_timeout", attempts, poll_count, run_id=run_id, company_type="root")
             for name in root_names
@@ -594,17 +811,72 @@ class SpiderClient:
         :Author: gexinyan
         :CreateTime: 2026-07-20 18:00:00
         """
-        root_rows = data.get("roots") if isinstance(data.get("roots"), list) else []
+        root_rows_value = data.get("roots")
+        root_rows: list[dict[str, Any]] = (
+            [row for row in root_rows_value if isinstance(row, dict)]
+            if isinstance(root_rows_value, list)
+            else []
+        )
+        rows_by_name = {
+            normalize_text(row.get("companyName") or row.get("name")).casefold(): row
+            for row in root_rows
+            if isinstance(row, dict) and normalize_text(row.get("companyName") or row.get("name"))
+        }
+        queue_root_rows = []
+        for item in queue_items:
+            try:
+                if int(item.get("depth", item.get("currentDepth", -1))) == 0:
+                    queue_root_rows.append(item)
+            except (TypeError, ValueError):
+                continue
         root_entities: list[SpiderTaskResult] = []
         for index, name in enumerate(root_names):
-            row = root_rows[index] if index < len(root_rows) and isinstance(root_rows[index], dict) else {}
-            raw_status = normalize_text(row.get("status") or data.get("rootStatus") or data.get("status"))
-            has_data = bool(row.get("hasData", False)) or any(
+            row: dict[str, Any] | None = rows_by_name.get(normalize_text(name).casefold())
+            if row is None:
+                row = next(
+                    (
+                        item for item in root_rows
+                        if isinstance(item, dict) and item.get("rootOrder") == index
+                    ),
+                    root_rows[index] if index < len(root_rows) and isinstance(root_rows[index], dict) else {},
+                )
+            name_key = normalize_text(name).casefold()
+            queue_row = next(
+                (
+                    item for item in queue_root_rows
+                    if normalize_text(item.get("rootCompany") or item.get("rootCompanyName")).casefold() == name_key
+                    or normalize_text(item.get("companyName") or item.get("name")).casefold() == name_key
+                ),
+                {},
+            )
+            raw_status = queue_item_raw_status(queue_row) or normalize_text(
+                row.get("queryStatus") or row.get("status") or data.get("rootStatus")
+            )
+            has_data = queue_item_has_data(queue_row) or normalize_boolean(row.get("hasData", False)) or any(
                 marker in raw_status.casefold() for marker in ("reuse", "existing", "已存在", "复用")
             )
             status = normalize_entity_status(raw_status, has_data)
             root_entities.append(
-                SpiderTaskResult(source_pdf, name, keyword, status, normalize_text(row.get("errorMessage")), run_id=run_id, company_type="root", raw_status=raw_status, has_data=has_data)
+                SpiderTaskResult(
+                    source_pdf,
+                    name,
+                    keyword,
+                    status,
+                    entity_error_message(queue_row) or entity_error_message(row),
+                    run_id=run_id,
+                    company_type="root",
+                    raw_status=raw_status,
+                    has_data=has_data,
+                    company_id=normalize_text(
+                        queue_row.get("companyId")
+                        or queue_row.get("enterpriseId")
+                        or queue_row.get("entId")
+                        or queue_row.get("creditCode")
+                        or row.get("companyId")
+                        or row.get("enterpriseId")
+                        or row.get("creditCode")
+                    ),
+                )
             )
         related_entities = self._queue_entities(source_pdf, keyword, run_id, queue_items, set(root_names))
         entities = tuple(root_entities + related_entities)
@@ -621,7 +893,7 @@ class SpiderClient:
             )
         else:
             related_total = len(related_entities)
-        expansion_status = normalize_text(data.get("status") or data.get("expansionStatus") or "WAITING").upper()
+        expansion_status = normalize_text(data.get("expansionStatus") or data.get("status") or "WAITING").upper()
         return RunProgress(run_id, len(root_entities), root_counts["success"], root_counts["failed"], root_counts["existing"], related_total, related_counts["success"], related_counts["failed"], related_counts["existing"], expansion_status, entities)
 
     def _queue_entities(self, source_pdf: str, keyword: str, run_id: str, items: list[dict[str, Any]], root_names: set[str]) -> list[SpiderTaskResult]:
@@ -642,32 +914,144 @@ class SpiderClient:
         for item in items:
             depth = item.get("depth", item.get("currentDepth", item.get("relationDepth", 1)))
             try:
-                if int(depth) < 1:
+                if int(depth) != 1:
                     continue
             except (TypeError, ValueError):
                 continue
             name = normalize_text(item.get("companyName") or item.get("name"))
-            stable_id = normalize_text(item.get("companyId") or item.get("id"))
+            stable_id = normalize_text(
+                item.get("companyId")
+                or item.get("enterpriseId")
+                or item.get("entId")
+                or item.get("creditCode")
+                or item.get("id")
+            )
             key = stable_id or name.casefold()
             if not name or not key or name.casefold() in root_keys or key in seen:
                 continue
             seen.add(key)
-            raw_status = normalize_text(item.get("status") or item.get("queryStatus"))
-            has_data = bool(item.get("hasData", False))
-            result.append(SpiderTaskResult(source_pdf, name, keyword, normalize_entity_status(raw_status, has_data), normalize_text(item.get("errorMessage")), run_id=run_id, company_type="related", raw_status=raw_status, has_data=has_data, related_sources=tuple(sorted(root_names))))
+            raw_status = queue_item_raw_status(item)
+            has_data = queue_item_has_data(item) or any(
+                marker in raw_status.casefold() for marker in ("reuse", "existing", "已存在", "复用")
+            )
+            sources = self._related_sources(item, root_names)
+            result.append(
+                SpiderTaskResult(
+                    source_pdf,
+                    name,
+                    keyword,
+                    normalize_entity_status(raw_status, has_data),
+                    entity_error_message(item),
+                    run_id=run_id,
+                    company_type="related",
+                    raw_status=raw_status,
+                    has_data=has_data,
+                    related_sources=sources,
+                    company_id=stable_id,
+                )
+            )
         return result
 
-    def _finalize_run_results(self, progress: RunProgress, attempts: int, poll_count: int) -> list[SpiderTaskResult]:
+    def _related_sources(self, item: dict[str, Any], root_names: set[str]) -> tuple[str, ...]:
+        """
+        【方法功能】从关联节点提取根企业来源，字段缺失时回退到本次提交的根企业集合。
+        :param item: dict[str, Any]，关联企业队列节点
+        :param root_names: set[str]，本次 runId 根企业集合
+        :return: tuple[str, ...]，排序去重后的来源企业名称
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 09:30:00
+        """
+        sources: set[str] = set()
+        for key in (
+            "rootCompanyName",
+            "rootCompany",
+            "sourceRootCompany",
+            "sourceCompanyName",
+            "relatedFrom",
+            "parentCompanyName",
+            "parentCompany",
+            "discoveredByCompanyName",
+        ):
+            value = normalize_text(item.get(key))
+            if value:
+                sources.add(value)
+        for key in ("rootCompanyNames", "sourceRootCompanies", "relatedSources"):
+            values = item.get(key)
+            if isinstance(values, list):
+                sources.update(normalize_text(value) for value in values if normalize_text(value))
+        return tuple(sorted(sources or root_names))
+
+    def _run_entities_terminal(self, progress: RunProgress) -> bool:
+        """
+        【方法功能】确认根企业和已发现关联企业数量齐全且均进入终态。
+        :param progress: RunProgress，当前 runId 快照
+        :return: bool，全部企业进入 success、failed 或 existing 时返回 True
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 09:30:00
+        """
+        expected_total = progress.root_total + progress.related_total
+        return len(progress.entities) >= expected_total and all(
+            item.status in TERMINAL_ENTITY_STATUSES for item in progress.entities
+        )
+
+    def _finalize_run_results(
+        self,
+        progress: RunProgress,
+        attempts: int,
+        poll_count: int,
+        unresolved_status: str = "",
+        unresolved_message: str = "",
+    ) -> list[SpiderTaskResult]:
         """
         【方法功能】为已结束的关联扩展任务补齐请求尝试次数和轮询次数。
         :param progress: RunProgress，终态运行快照
         :param attempts: int，提交尝试次数
         :param poll_count: int，轮询次数
+        :param unresolved_status: str，非终态企业的强制结束状态
+        :param unresolved_message: str，非终态企业的结束原因
         :return: list[SpiderTaskResult]，终态企业结果
         :Author: gexinyan
         :CreateTime: 2026-07-20 18:00:00
         """
-        return [replace(item, attempts=attempts, poll_count=poll_count) for item in progress.entities]
+        results: list[SpiderTaskResult] = []
+        final_expansion_status = "FAILED" if unresolved_status else progress.expansion_status
+        for item in progress.entities:
+            update_status = unresolved_status if unresolved_status and item.status not in TERMINAL_ENTITY_STATUSES else item.status
+            update_message = item.message
+            if update_status != item.status and unresolved_message:
+                update_message = "; ".join(part for part in (item.message, unresolved_message) if part)
+            audit_source = replace(item, expansion_status=progress.expansion_status)
+            results.append(
+                replace(
+                    item,
+                    status=update_status,
+                    message=update_message,
+                    attempts=attempts,
+                    poll_count=poll_count,
+                    expansion_status=final_expansion_status,
+                    audit_results=_result_audits(audit_source),
+                )
+            )
+        roots = [item for item in results if item.company_type == "root"]
+        related = [item for item in results if item.company_type == "related"]
+        root_counts = _status_counts(roots)
+        related_counts = _status_counts(related)
+        self._emit_run_progress(
+            RunProgress(
+                progress.run_id,
+                progress.root_total,
+                root_counts["success"],
+                root_counts["failed"],
+                root_counts["existing"],
+                progress.related_total,
+                related_counts["success"],
+                related_counts["failed"],
+                related_counts["existing"],
+                final_expansion_status,
+                tuple(results),
+            )
+        )
+        return results
 
     def _emit_run_progress(self, progress: RunProgress) -> None:
         """
@@ -1010,6 +1394,7 @@ class CrawlDispatcher:
                 with self._lock:
                     self._completed.extend(results)
             with self._lock:
+                self._completed = consolidate_spider_results(self._completed)
                 return list(self._completed)
         finally:
             if self._executor is not None:
@@ -1077,22 +1462,30 @@ class CrawlDispatcher:
         """
         failed = any(item.status in {"failed", "timeout"} for item in results if item.company_type == "root")
         skipped = any(item.status == "skipped" for item in results)
-        root_counts = _status_counts(item for item in results if item.company_type == "root")
-        related_counts = _status_counts(item for item in results if item.company_type == "related")
         with self._lock:
-            self._progress = replace(
-                self._progress,
-                running=max(0, self._progress.running - 1),
-                completed=self._progress.completed + 1,
-                failed=self._progress.failed + int(failed),
-                skipped=self._progress.skipped + int(skipped),
-                root_success=max(self._progress.root_success, root_counts["success"]),
-                root_failed=max(self._progress.root_failed, root_counts["failed"]),
-                root_existing=max(self._progress.root_existing, root_counts["existing"]),
-                related_success=max(self._progress.related_success, related_counts["success"]),
-                related_failed=max(self._progress.related_failed, related_counts["failed"]),
-                related_existing=max(self._progress.related_existing, related_counts["existing"]),
-            )
+            run_progress_known = any(item.run_id and item.run_id in self._run_progresses for item in results)
+            if run_progress_known:
+                self._progress = replace(
+                    self._progress,
+                    running=max(0, self._progress.running - 1),
+                    skipped=self._progress.skipped + int(skipped),
+                )
+            else:
+                root_counts = _status_counts(item for item in results if item.company_type == "root")
+                related_counts = _status_counts(item for item in results if item.company_type == "related")
+                self._progress = replace(
+                    self._progress,
+                    running=max(0, self._progress.running - 1),
+                    completed=self._progress.completed + 1,
+                    failed=self._progress.failed + int(failed),
+                    skipped=self._progress.skipped + int(skipped),
+                    root_success=self._progress.root_success + root_counts["success"],
+                    root_failed=self._progress.root_failed + root_counts["failed"],
+                    root_existing=self._progress.root_existing + root_counts["existing"],
+                    related_success=self._progress.related_success + related_counts["success"],
+                    related_failed=self._progress.related_failed + related_counts["failed"],
+                    related_existing=self._progress.related_existing + related_counts["existing"],
+                )
         self._emit_progress()
 
     def _on_run_progress(self, run_progress: RunProgress) -> None:
@@ -1106,18 +1499,15 @@ class CrawlDispatcher:
         with self._lock:
             self._run_progresses[run_progress.run_id] = run_progress
             runs = list(self._run_progresses.values())
-            related_entities: dict[str, SpiderTaskResult] = {}
+            related_items: list[SpiderTaskResult] = []
             fallback_related_total = 0
             for item in runs:
                 entities = [entity for entity in item.entities if entity.company_type == "related"]
                 if not entities:
                     fallback_related_total += item.related_total
-                for entity in entities:
-                    key = normalize_text(entity.company_name).casefold()
-                    previous = related_entities.get(key)
-                    if previous is None or entity.status == "existing" or (entity.status == "failed" and previous.status == "success"):
-                        related_entities[key] = entity
-            related_counts = _status_counts(related_entities.values())
+                related_items.extend(entities)
+            related_entities = consolidate_spider_results(related_items)
+            related_counts = _status_counts(related_entities)
             related_total = len(related_entities) + fallback_related_total
             related_success = related_counts["success"]
             related_failed = related_counts["failed"]

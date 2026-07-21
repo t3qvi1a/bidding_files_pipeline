@@ -78,6 +78,12 @@ select:focus, input:focus { outline: 2px solid rgba(36, 87, 214, .18); border-co
 .parallel-progress-item .progress-meta { margin-bottom: 10px; }
 .parallel-progress-item .progress-meta strong { font-size: 15px; }
 .spider-progress-bar { background: linear-gradient(90deg, #087f5b, #2ca58d); }
+.enterprise-progress-group { margin-top: 14px; }
+.enterprise-progress-group .progress-meta { margin-bottom: 7px; }
+.enterprise-progress-group .progress-meta strong { font-size: 13px; }
+.enterprise-progress-group .progress-track { height: 6px; }
+.root-progress-bar { background: linear-gradient(90deg, #2457d6, #6c8ff0); }
+.related-progress-bar { background: linear-gradient(90deg, #7c3aed, #a78bfa); }
 .progress-detail { min-height: 18px; margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .stage-list { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 24px 0 0; padding: 0; list-style: none; }
 .stage-list li { display: flex; align-items: center; gap: 8px; color: #8a94a6; font-size: 12px; }

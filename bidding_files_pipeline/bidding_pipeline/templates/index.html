@@ -109,10 +109,18 @@
             <p id="pdf-progress-detail" class="progress-detail">等待开始解析</p>
           </section>
           <section class="parallel-progress-item" aria-label="企业信息爬取进度">
-            <div class="progress-meta"><span>企业信息爬取</span><strong id="spider-progress-value">0%</strong></div>
+            <div class="progress-meta"><span>企业整体进度</span><strong id="spider-progress-value">0%</strong></div>
             <div class="progress-track"><div id="spider-progress-bar" class="progress-bar spider-progress-bar"></div></div>
             <p id="spider-progress-detail" class="progress-detail">等待 PDF 解析结果</p>
+            <div class="enterprise-progress-group">
+              <div class="progress-meta"><span>根企业进度</span><strong id="root-progress-value">0%</strong></div>
+              <div class="progress-track"><div id="root-progress-bar" class="progress-bar root-progress-bar"></div></div>
+            </div>
             <p id="root-progress-detail" class="progress-detail">根企业：0 家｜已完成：0｜失败：0｜数据已存在：0</p>
+            <div class="enterprise-progress-group">
+              <div class="progress-meta"><span>关联企业进度</span><strong id="related-progress-value">0%</strong></div>
+              <div class="progress-track"><div id="related-progress-bar" class="progress-bar related-progress-bar"></div></div>
+            </div>
             <p id="related-progress-detail" class="progress-detail">已发现关联企业：0 家｜已完成：0｜失败：0｜数据已存在：0</p>
             <p id="expansion-status-detail" class="progress-detail">关系扩展状态：WAITING</p>
           </section>

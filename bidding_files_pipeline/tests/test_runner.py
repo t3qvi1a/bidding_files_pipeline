@@ -105,6 +105,9 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(outcome.final_record_count, 1)
             self.assertEqual(manifest["finalRecordCount"], 1)
             self.assertEqual(crawl["results"][0]["status"], "skipped")
+            self.assertEqual(crawl["statistics"]["root"]["total"], 1)
+            self.assertEqual(crawl["statistics"]["related"]["total"], 0)
+            self.assertEqual(manifest["spiderStatistics"], crawl["statistics"])
 
     def test_pipeline_dispatches_spider_before_ocr_finishes_then_runs_follow_up_stages(self) -> None:
         """

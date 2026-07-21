@@ -127,11 +127,11 @@ def normalize_pdf_progress(value: Any) -> dict[str, int]:
     }
 
 
-def normalize_spider_progress(value: Any) -> dict[str, int | str]:
+def normalize_spider_progress(value: Any) -> dict[str, Any]:
     """
     【函数功能】校验并标准化企业爬虫动态进度，兼容历史状态文件的缺失字段。
     :param value: Any，原始爬虫进度对象
-    :return: dict[str, int | str]，爬虫队列的可安全展示进度对象
+    :return: dict[str, Any]，包含根企业和关联企业嵌套统计的安全进度对象
     :Author: gexinyan
     :CreateTime: 2026-07-17 10:30:00
     Example: normalize_spider_progress({"discovered": 2, "completed": 1})
@@ -152,7 +152,8 @@ def normalize_spider_progress(value: Any) -> dict[str, int | str]:
         :Author: gexinyan
         :CreateTime: 2026-07-20 18:00:00
         """
-        group = payload.get(name) if isinstance(payload.get(name), dict) else {}
+        raw_group = payload.get(name)
+        group: dict[str, Any] = raw_group if isinstance(raw_group, dict) else {}
         total = _nonnegative_int(group.get("total", 0))
         success = min(_nonnegative_int(group.get("success", 0)), total)
         failed = min(_nonnegative_int(group.get("failed", 0)), total - success)
@@ -184,7 +185,7 @@ class JobState:
         stage: str，当前阶段说明
         progress: int，0 到 100 的进度值
         pdf_progress: dict[str, int]，PDF 解析实时进度
-        spider_progress: dict[str, int | str]，企业爬虫实时进度
+        spider_progress: dict[str, Any]，企业爬虫实时进度
         logs: list[str]，最近运行日志
         artifacts: dict[str, Path]，可下载产物路径
         error: str，失败摘要
@@ -206,7 +207,7 @@ class JobState:
     stage: str = "等待执行"
     progress: int = 0
     pdf_progress: dict[str, int] = field(default_factory=lambda: normalize_pdf_progress({}))
-    spider_progress: dict[str, int | str] = field(default_factory=lambda: normalize_spider_progress({}))
+    spider_progress: dict[str, Any] = field(default_factory=lambda: normalize_spider_progress({}))
     logs: list[str] = field(default_factory=list)
     artifacts: dict[str, Path] = field(default_factory=dict)
     error: str = ""
