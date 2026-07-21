@@ -337,8 +337,14 @@ function renderPdfProgress(progress) {
  */
 function renderSpiderProgress(progress) {
   const current = progress || {};
-  const discovered = Math.max(0, Number(current.discovered) || 0);
-  const completed = Math.min(Math.max(0, Number(current.completed) || 0), discovered);
+  const root = current.root || {};
+  const related = current.related || {};
+  const rootTotal = Math.max(0, Number(root.total) || 0);
+  const relatedTotal = Math.max(0, Number(related.total) || 0);
+  const discovered = rootTotal + relatedTotal || Math.max(0, Number(current.discovered) || 0);
+  const rootFinished = Math.min(rootTotal, (Number(root.success) || 0) + (Number(root.failed) || 0) + (Number(root.existing) || 0));
+  const relatedFinished = Math.min(relatedTotal, (Number(related.success) || 0) + (Number(related.failed) || 0) + (Number(related.existing) || 0));
+  const completed = rootTotal + relatedTotal > 0 ? rootFinished + relatedFinished : Math.min(Math.max(0, Number(current.completed) || 0), discovered);
   const running = Math.max(0, Number(current.running) || 0);
   const failed = Math.max(0, Number(current.failed) || 0);
   const percent = discovered > 0 ? Math.floor(completed * 100 / discovered) : 0;
@@ -352,6 +358,9 @@ function renderSpiderProgress(progress) {
   byId("spider-progress-value").textContent = `${percent}%`;
   byId("spider-progress-bar").style.width = `${percent}%`;
   byId("spider-progress-detail").textContent = detail;
+  byId("root-progress-detail").textContent = `根企业：${rootTotal} 家｜已完成：${Number(root.success) || 0}｜失败：${Number(root.failed) || 0}｜数据已存在：${Number(root.existing) || 0}`;
+  byId("related-progress-detail").textContent = `已发现关联企业：${relatedTotal} 家｜已完成：${Number(related.success) || 0}｜失败：${Number(related.failed) || 0}｜数据已存在：${Number(related.existing) || 0}`;
+  byId("expansion-status-detail").textContent = `关系扩展状态：${current.expansionStatus || "WAITING"}`;
 }
 
 /**

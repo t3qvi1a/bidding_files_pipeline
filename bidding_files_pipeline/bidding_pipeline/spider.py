@@ -38,6 +38,9 @@ class SpiderConfig:
         poll_interval_seconds: float，状态轮询间隔秒数
         max_poll_seconds: float，单个企业最长轮询时长
         retry_delays: tuple[float, ...]，网络或 5xx 失败后的重试间隔
+        fetch_deep_info: bool，是否采集企业深度信息
+        fetch_bidding_detail: bool，是否采集招投标详情
+        relation_expansion_depth: int，企业关联关系扩展层数
     :Author: gexinyan
     :CreateTime: 2026-07-16 10:00:00
     """
@@ -48,6 +51,9 @@ class SpiderConfig:
     poll_interval_seconds: float = 5.0
     max_poll_seconds: float = 180.0
     retry_delays: tuple[float, ...] = (5.0, 15.0)
+    fetch_deep_info: bool = False
+    fetch_bidding_detail: bool = False
+    relation_expansion_depth: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +102,11 @@ class SpiderTaskResult:
     poll_count: int = 0
     database_rows: int = 0
     effective_fields: dict[str, str] = field(default_factory=dict)
+    run_id: str = ""
+    company_type: str = "root"
+    raw_status: str = ""
+    has_data: bool = False
+    related_sources: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """
@@ -114,7 +125,45 @@ class SpiderTaskResult:
             "pollCount": self.poll_count,
             "databaseRows": self.database_rows,
             "effectiveFields": self.effective_fields,
+            "runId": self.run_id,
+            "companyType": self.company_type,
+            "rawStatus": self.raw_status,
+            "hasData": self.has_data,
+            "relatedSources": list(self.related_sources),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class RunProgress:
+    """
+    【类功能】保存单次 runId 关联企业扩展任务的根企业、关联企业及扩展状态快照。
+    :Attributes:
+        run_id: str，爬虫服务任务标识
+        root_total: int，根企业总数
+        root_success: int，根企业成功数
+        root_failed: int，根企业失败数
+        root_existing: int，根企业已有数据数
+        related_total: int，已发现关联企业数
+        related_success: int，关联企业成功数
+        related_failed: int，关联企业失败数
+        related_existing: int，关联企业已有数据数
+        expansion_status: str，服务端关系扩展状态
+        entities: tuple[SpiderTaskResult, ...]，本次快照中的企业结果
+    :Author: gexinyan
+    :CreateTime: 2026-07-20 18:00:00
+    """
+
+    run_id: str
+    root_total: int
+    root_success: int
+    root_failed: int
+    root_existing: int
+    related_total: int
+    related_success: int
+    related_failed: int
+    related_existing: int
+    expansion_status: str
+    entities: tuple[SpiderTaskResult, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +189,15 @@ class CrawlProgress:
     failed: int = 0
     skipped: int = 0
     phase: str = "waiting_for_companies"
+    root_total: int = 0
+    root_success: int = 0
+    root_failed: int = 0
+    root_existing: int = 0
+    related_total: int = 0
+    related_success: int = 0
+    related_failed: int = 0
+    related_existing: int = 0
+    expansion_status: str = "WAITING"
 
     def to_dict(self) -> dict[str, int | str]:
         """
@@ -156,6 +214,19 @@ class CrawlProgress:
             "failed": self.failed,
             "skipped": self.skipped,
             "phase": self.phase,
+            "root": {
+                "total": self.root_total,
+                "success": self.root_success,
+                "failed": self.root_failed,
+                "existing": self.root_existing,
+            },
+            "related": {
+                "total": self.related_total,
+                "success": self.related_success,
+                "failed": self.related_failed,
+                "existing": self.related_existing,
+            },
+            "expansionStatus": self.expansion_status,
         }
 
 def parse_json_text(value: str) -> Any:
@@ -256,13 +327,69 @@ def classify_status(result: HttpResult) -> str:
     candidates = flatten_status_values(result.json_body)
     candidates.append(normalize_text(result.text).casefold())
     joined = " ".join(candidates)
-    if "has_data" in candidates or any(status in joined for status in SUCCESS_STATUSES):
-        return "success"
+    if "has_data" in candidates:
+        return "existing"
     if any(status in joined for status in FAILED_STATUSES):
         return "failed"
+    if any(status in joined for status in SUCCESS_STATUSES):
+        return "success"
     if any(status in joined for status in RUNNING_STATUSES):
         return "running"
     return "unknown"
+
+
+def normalize_entity_status(raw_status: Any, has_data: bool) -> str:
+    """
+    【函数功能】按已有数据优先规则将服务端企业状态标准化为 Pipeline 状态。
+    :param raw_status: Any，服务端原始状态字段
+    :param has_data: bool，服务端是否明确表示已有数据
+    :return: str，success、failed、existing、running 或 waiting
+    :Author: gexinyan
+    :CreateTime: 2026-07-20 18:00:00
+    Example: normalize_entity_status("FAILED", True)
+    """
+    if has_data:
+        return "existing"
+    text = normalize_text(raw_status).casefold()
+    if any(value in text for value in FAILED_STATUSES):
+        return "failed"
+    if any(value in text for value in SUCCESS_STATUSES):
+        return "success"
+    if any(value in text for value in RUNNING_STATUSES):
+        return "running"
+    return "waiting"
+
+
+def response_data(result: HttpResult) -> dict[str, Any]:
+    """
+    【函数功能】提取爬虫 HTTP 响应中 data 字段的字典内容。
+    :param result: HttpResult，HTTP 响应结果
+    :return: dict[str, Any]，响应 data 字段；结构不匹配时返回空字典
+    :Author: gexinyan
+    :CreateTime: 2026-07-20 18:00:00
+    Example: response_data(HttpResult(200, "", {"data": {}}))
+    """
+    body = result.json_body
+    if not isinstance(body, dict):
+        return {}
+    data = body.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _status_counts(items: Iterable[SpiderTaskResult]) -> dict[str, int]:
+    """
+    【函数功能】统计企业结果中的成功、失败和已有数据数量。
+    :param items: Iterable[SpiderTaskResult]，企业结果集合
+    :return: dict[str, int]，按标准状态聚合的数量
+    :Author: gexinyan
+    :CreateTime: 2026-07-20 18:00:00
+    Example: _status_counts([])
+    """
+    counts = {"success": 0, "failed": 0, "existing": 0}
+    for item in items:
+        if item.status in counts:
+            counts[item.status] += 1
+    return counts
 
 
 class SpiderClient:
@@ -283,6 +410,7 @@ class SpiderClient:
         verifier: Verifier | None = None,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
+        run_progress_callback: Callable[[RunProgress], None] | None = None,
     ) -> None:
         """
         【方法功能】初始化爬虫客户端并校验提交模式。
@@ -297,10 +425,13 @@ class SpiderClient:
         """
         if config.submit_mode not in {"single", "batch"}:
             raise ValueError("爬虫提交模式仅支持 single 或 batch")
+        if config.relation_expansion_depth < 0:
+            raise ValueError("relation_expansion_depth 不能小于 0")
         self.config = config
         self.verifier = verifier
         self.sleep = sleep
         self.monotonic = monotonic
+        self.run_progress_callback = run_progress_callback
 
     def crawl_document(self, source_pdf: str, company_names: Iterable[str]) -> list[SpiderTaskResult]:
         """
@@ -339,7 +470,12 @@ class SpiderClient:
         response, attempts = self._request_with_retry(
             self._crawl_url,
             "POST",
-            {"keyword": keyword},
+            {
+                "companyNames": names,
+                "fetchDeepInfo": self.config.fetch_deep_info,
+                "fetchBiddingDetail": self.config.fetch_bidding_detail,
+                "relationExpansionDepth": self.config.relation_expansion_depth,
+            },
         )
         if not is_success_response(response):
             message = response.error or truncate_message(response.text) or f"trigger_http_{response.status_code}"
@@ -347,7 +483,202 @@ class SpiderClient:
                 SpiderTaskResult(source_pdf, name, keyword, "failed", message, attempts=attempts)
                 for name in names
             ]
+        run_id = normalize_text(response_data(response).get("runId"))
+        if run_id:
+            return self._poll_run(source_pdf, names, keyword, run_id, attempts)
         return [self._poll_company(source_pdf, name, keyword, attempts) for name in names]
+
+    def _poll_run(
+        self,
+        source_pdf: str,
+        root_names: list[str],
+        keyword: str,
+        run_id: str,
+        attempts: int,
+    ) -> list[SpiderTaskResult]:
+        """
+        【方法功能】按 runId 轮询根企业及关联企业扩展任务，直至服务端扩展任务结束。
+        :param source_pdf: str，触发爬取的 PDF 路径
+        :param root_names: list[str，本次提交的根企业名称
+        :param keyword: str，兼容旧审计字段的提交名称
+        :param run_id: str，服务端关联扩展任务标识
+        :param attempts: int，提交请求尝试次数
+        :return: list[SpiderTaskResult]，根企业及已返回的关联企业终态结果
+        :Author: gexinyan
+        :CreateTime: 2026-07-20 18:00:00
+        """
+        deadline = self.monotonic() + self.config.max_poll_seconds
+        poll_count = 0
+        latest: RunProgress | None = None
+        while self.monotonic() <= deadline:
+            response, _ = self._request_with_retry(self._run_url(run_id), "GET", None)
+            poll_count += 1
+            if not is_success_response(response):
+                return [
+                    SpiderTaskResult(
+                        source_pdf, name, keyword, "failed",
+                        response.error or truncate_message(response.text) or f"run_status_http_{response.status_code}",
+                        attempts, poll_count, run_id=run_id, company_type="root",
+                    )
+                    for name in root_names
+                ]
+            data = response_data(response)
+            queue_items = self._read_run_queue(run_id)
+            latest = self._build_run_progress(source_pdf, root_names, keyword, run_id, data, queue_items)
+            self._emit_run_progress(latest)
+            if latest.expansion_status in {"COMPLETED", "FAILED", "CANCELLED"}:
+                return self._finalize_run_results(latest, attempts, poll_count)
+            if self.monotonic() + self.config.poll_interval_seconds > deadline:
+                break
+            self.sleep(self.config.poll_interval_seconds)
+        if latest is not None:
+            timed_out = [
+                replace(item, status="timeout", message="relation_expansion_timeout", attempts=attempts, poll_count=poll_count)
+                for item in latest.entities
+                if item.company_type == "root"
+            ]
+            return timed_out or [
+                SpiderTaskResult(source_pdf, name, keyword, "timeout", "relation_expansion_timeout", attempts, poll_count, run_id=run_id, company_type="root")
+                for name in root_names
+            ]
+        return [
+            SpiderTaskResult(source_pdf, name, keyword, "timeout", "relation_expansion_timeout", attempts, poll_count, run_id=run_id, company_type="root")
+            for name in root_names
+        ]
+
+    def _read_run_queue(self, run_id: str) -> list[dict[str, Any]]:
+        """
+        【方法功能】读取 runId 关联扩展队列中的全部企业节点快照。
+        :param run_id: str，服务端关联扩展任务标识
+        :return: list[dict[str, Any]]，队列节点列表；接口不可用时返回空列表
+        :Author: gexinyan
+        :CreateTime: 2026-07-20 18:00:00
+        """
+        result: list[dict[str, Any]] = []
+        page_num = 1
+        while True:
+            response, _ = self._request_with_retry(self._queue_url(run_id, page_num), "GET", None)
+            if not is_success_response(response):
+                return result
+            data = response_data(response)
+            items = data.get("items")
+            if not isinstance(items, list):
+                return result
+            result.extend(item for item in items if isinstance(item, dict))
+            total = int(data.get("total") or len(result))
+            page_size = max(1, int(data.get("pageSize") or 100))
+            if len(result) >= total or not items:
+                return result
+            page_num += 1
+            if page_num > max(1, (total + page_size - 1) // page_size):
+                return result
+
+    def _build_run_progress(
+        self,
+        source_pdf: str,
+        root_names: list[str],
+        keyword: str,
+        run_id: str,
+        data: dict[str, Any],
+        queue_items: list[dict[str, Any]],
+    ) -> RunProgress:
+        """
+        【方法功能】将 runId 状态与队列节点转换为前端可聚合的根企业和关联企业进度快照。
+        :param source_pdf: str，触发爬取的 PDF 路径
+        :param root_names: list[str，本次提交根企业名称
+        :param keyword: str，兼容旧审计字段的提交名称
+        :param run_id: str，服务端关联扩展任务标识
+        :param data: dict[str, Any]，运行状态接口 data 内容
+        :param queue_items: list[dict[str, Any]]，队列接口节点内容
+        :return: RunProgress，规范化运行进度
+        :Author: gexinyan
+        :CreateTime: 2026-07-20 18:00:00
+        """
+        root_rows = data.get("roots") if isinstance(data.get("roots"), list) else []
+        root_entities: list[SpiderTaskResult] = []
+        for index, name in enumerate(root_names):
+            row = root_rows[index] if index < len(root_rows) and isinstance(root_rows[index], dict) else {}
+            raw_status = normalize_text(row.get("status") or data.get("rootStatus") or data.get("status"))
+            has_data = bool(row.get("hasData", False)) or any(
+                marker in raw_status.casefold() for marker in ("reuse", "existing", "已存在", "复用")
+            )
+            status = normalize_entity_status(raw_status, has_data)
+            root_entities.append(
+                SpiderTaskResult(source_pdf, name, keyword, status, normalize_text(row.get("errorMessage")), run_id=run_id, company_type="root", raw_status=raw_status, has_data=has_data)
+            )
+        related_entities = self._queue_entities(source_pdf, keyword, run_id, queue_items, set(root_names))
+        entities = tuple(root_entities + related_entities)
+        root_counts = _status_counts(root_entities)
+        related_counts = _status_counts(related_entities)
+        if not related_entities:
+            root_existing = root_counts["existing"]
+            related_counts["existing"] = max(0, int(data.get("databaseReuseCount") or 0) - root_existing)
+            related_counts["success"] = max(0, int(data.get("crawlSuccessCount") or 0) - root_counts["success"])
+            related_counts["failed"] = max(0, int(data.get("failedCount") or 0) - root_counts["failed"])
+            related_total = max(
+                related_counts["success"] + related_counts["failed"] + related_counts["existing"] + int(data.get("waitingNodes") or 0),
+                max(0, int(data.get("totalNodes") or 0) - len(root_entities)),
+            )
+        else:
+            related_total = len(related_entities)
+        expansion_status = normalize_text(data.get("status") or data.get("expansionStatus") or "WAITING").upper()
+        return RunProgress(run_id, len(root_entities), root_counts["success"], root_counts["failed"], root_counts["existing"], related_total, related_counts["success"], related_counts["failed"], related_counts["existing"], expansion_status, entities)
+
+    def _queue_entities(self, source_pdf: str, keyword: str, run_id: str, items: list[dict[str, Any]], root_names: set[str]) -> list[SpiderTaskResult]:
+        """
+        【方法功能】从关联扩展队列提取去重后的第一层关联企业结果。
+        :param source_pdf: str，触发爬取的 PDF 路径
+        :param keyword: str，兼容旧审计字段的提交名称
+        :param run_id: str，服务端关联扩展任务标识
+        :param items: list[dict[str, Any]]，队列节点列表
+        :param root_names: set[str]，根企业名称集合
+        :return: list[SpiderTaskResult]，关联企业结果
+        :Author: gexinyan
+        :CreateTime: 2026-07-20 18:00:00
+        """
+        result: list[SpiderTaskResult] = []
+        seen: set[str] = set()
+        root_keys = {normalize_text(name).casefold() for name in root_names}
+        for item in items:
+            depth = item.get("depth", item.get("currentDepth", item.get("relationDepth", 1)))
+            try:
+                if int(depth) < 1:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            name = normalize_text(item.get("companyName") or item.get("name"))
+            stable_id = normalize_text(item.get("companyId") or item.get("id"))
+            key = stable_id or name.casefold()
+            if not name or not key or name.casefold() in root_keys or key in seen:
+                continue
+            seen.add(key)
+            raw_status = normalize_text(item.get("status") or item.get("queryStatus"))
+            has_data = bool(item.get("hasData", False))
+            result.append(SpiderTaskResult(source_pdf, name, keyword, normalize_entity_status(raw_status, has_data), normalize_text(item.get("errorMessage")), run_id=run_id, company_type="related", raw_status=raw_status, has_data=has_data, related_sources=tuple(sorted(root_names))))
+        return result
+
+    def _finalize_run_results(self, progress: RunProgress, attempts: int, poll_count: int) -> list[SpiderTaskResult]:
+        """
+        【方法功能】为已结束的关联扩展任务补齐请求尝试次数和轮询次数。
+        :param progress: RunProgress，终态运行快照
+        :param attempts: int，提交尝试次数
+        :param poll_count: int，轮询次数
+        :return: list[SpiderTaskResult]，终态企业结果
+        :Author: gexinyan
+        :CreateTime: 2026-07-20 18:00:00
+        """
+        return [replace(item, attempts=attempts, poll_count=poll_count) for item in progress.entities]
+
+    def _emit_run_progress(self, progress: RunProgress) -> None:
+        """
+        【方法功能】向调度器发送关联扩展过程中的结构化进度快照。
+        :param progress: RunProgress，当前 runId 快照
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-20 18:00:00
+        """
+        if self.run_progress_callback is not None:
+            self.run_progress_callback(progress)
 
     def _poll_company(
         self,
@@ -487,6 +818,28 @@ class SpiderClient:
         """
         return self.config.base_url.rstrip("/") + "/spider/crawl/status"
 
+    def _run_url(self, run_id: str) -> str:
+        """
+        【方法功能】生成按 runId 查询关联企业扩展状态的接口地址。
+        :param run_id: str，服务端关联扩展任务标识
+        :return: str，GET /spider/crawl/runs/{runId} 地址
+        :Author: gexinyan
+        :CreateTime: 2026-07-20 18:00:00
+        """
+        return self.config.base_url.rstrip("/") + "/spider/crawl/runs/" + parse.quote(run_id, safe="")
+
+    def _queue_url(self, run_id: str, page_num: int) -> str:
+        """
+        【方法功能】生成关联企业扩展队列分页查询接口地址。
+        :param run_id: str，服务端关联扩展任务标识
+        :param page_num: int，页码，从 1 开始
+        :return: str，GET 队列分页接口地址
+        :Author: gexinyan
+        :CreateTime: 2026-07-20 18:00:00
+        """
+        query = parse.urlencode({"pageNum": page_num, "pageSize": 100})
+        return self._run_url(run_id) + "/queue?" + query
+
     def _request_with_retry(
         self,
         url: str,
@@ -576,8 +929,11 @@ class CrawlDispatcher:
         self._futures: list[tuple[str, str, Future[list[SpiderTaskResult]]]] = []
         self._completed: list[SpiderTaskResult] = []
         self._seen_names: set[str] = set()
+        self._run_progresses: dict[str, RunProgress] = {}
         self._progress = CrawlProgress()
         self._waited = False
+        if self.client is not None:
+            self.client.run_progress_callback = self._on_run_progress
 
     def on_pdf_completed(self, document: Any, _: list[str]) -> None:
         """
@@ -599,6 +955,7 @@ class CrawlDispatcher:
             self._progress = replace(
                 self._progress,
                 discovered=self._progress.discovered + len(names),
+                root_total=self._progress.root_total + len(names),
                 phase="crawling" if self.enabled else self._progress.phase,
             )
         if not self.enabled or self.client is None or self._executor is None:
@@ -718,8 +1075,10 @@ class CrawlDispatcher:
         :Author: gexinyan
         :CreateTime: 2026-07-17 10:30:00
         """
-        failed = any(item.status in {"failed", "timeout"} for item in results)
+        failed = any(item.status in {"failed", "timeout"} for item in results if item.company_type == "root")
         skipped = any(item.status == "skipped" for item in results)
+        root_counts = _status_counts(item for item in results if item.company_type == "root")
+        related_counts = _status_counts(item for item in results if item.company_type == "related")
         with self._lock:
             self._progress = replace(
                 self._progress,
@@ -727,6 +1086,63 @@ class CrawlDispatcher:
                 completed=self._progress.completed + 1,
                 failed=self._progress.failed + int(failed),
                 skipped=self._progress.skipped + int(skipped),
+                root_success=max(self._progress.root_success, root_counts["success"]),
+                root_failed=max(self._progress.root_failed, root_counts["failed"]),
+                root_existing=max(self._progress.root_existing, root_counts["existing"]),
+                related_success=max(self._progress.related_success, related_counts["success"]),
+                related_failed=max(self._progress.related_failed, related_counts["failed"]),
+                related_existing=max(self._progress.related_existing, related_counts["existing"]),
+            )
+        self._emit_progress()
+
+    def _on_run_progress(self, run_progress: RunProgress) -> None:
+        """
+        【方法功能】接收单个 runId 的关联扩展快照并更新全任务根企业、关联企业进度。
+        :param run_progress: RunProgress，单个关联扩展任务快照
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-20 18:00:00
+        """
+        with self._lock:
+            self._run_progresses[run_progress.run_id] = run_progress
+            runs = list(self._run_progresses.values())
+            related_entities: dict[str, SpiderTaskResult] = {}
+            fallback_related_total = 0
+            for item in runs:
+                entities = [entity for entity in item.entities if entity.company_type == "related"]
+                if not entities:
+                    fallback_related_total += item.related_total
+                for entity in entities:
+                    key = normalize_text(entity.company_name).casefold()
+                    previous = related_entities.get(key)
+                    if previous is None or entity.status == "existing" or (entity.status == "failed" and previous.status == "success"):
+                        related_entities[key] = entity
+            related_counts = _status_counts(related_entities.values())
+            related_total = len(related_entities) + fallback_related_total
+            related_success = related_counts["success"]
+            related_failed = related_counts["failed"]
+            related_existing = related_counts["existing"]
+            root_success = sum(item.root_success for item in runs)
+            root_failed = sum(item.root_failed for item in runs)
+            root_existing = sum(item.root_existing for item in runs)
+            phases = {item.expansion_status for item in runs}
+            expansion_status = (
+                "FAILED" if "FAILED" in phases else "RUNNING" if "RUNNING" in phases
+                else "WAITING" if "WAITING" in phases else "COMPLETED"
+            )
+            self._progress = replace(
+                self._progress,
+                discovered=self._progress.root_total + related_total,
+                completed=root_success + root_failed + root_existing + related_success + related_failed + related_existing,
+                failed=root_failed + related_failed,
+                root_success=root_success,
+                root_failed=root_failed,
+                root_existing=root_existing,
+                related_total=related_total,
+                related_success=related_success,
+                related_failed=related_failed,
+                related_existing=related_existing,
+                expansion_status=expansion_status,
             )
         self._emit_progress()
 

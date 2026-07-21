@@ -119,6 +119,60 @@ class WebJobStateTests(unittest.TestCase):
             self.assertTrue((root / job.job_id / "job_state.json").is_file())
             restored_manager.executor.shutdown(wait=False, cancel_futures=True)
 
+    def test_structured_pdf_and_spider_progress_are_persisted_and_restored(self) -> None:
+        """
+        【方法功能】验证双进度条状态会写入任务文件，并兼容旧版状态文件的缺失字段。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-17 10:30:00
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manager = JobManager(root)
+            job = JobState(
+                job_id="dual-progress",
+                input_dir=root / "input",
+                output_dir=root / "dual-progress" / "output",
+                status="running",
+            )
+            manager.jobs[job.job_id] = job
+            manager._update_structured_progress(
+                job,
+                "pdf_progress",
+                {"completed": 3, "total": 5, "percent": 60},
+            )
+            manager._update_structured_progress(
+                job,
+                "spider_progress",
+                {
+                    "discovered": 4,
+                    "queued": 1,
+                    "running": 1,
+                    "completed": 2,
+                    "failed": 1,
+                    "skipped": 0,
+                    "phase": "crawling",
+                },
+            )
+            response = job.to_dict()
+            self.assertEqual(response["pdfProgress"], {"completed": 3, "total": 5, "percent": 60})
+            self.assertEqual(response["spiderProgress"]["discovered"], 4)
+            self.assertEqual(response["spiderProgress"]["failed"], 1)
+            manager.executor.shutdown(wait=False, cancel_futures=True)
+
+            restored_manager = JobManager(root)
+            restored = restored_manager.get_job(job.job_id)
+            self.assertEqual(restored.pdf_progress["completed"], 3)
+            self.assertEqual(restored.spider_progress["phase"], "crawling")
+            restored_manager.executor.shutdown(wait=False, cancel_futures=True)
+
+        legacy = JobState.from_storage_dict(
+            {"jobId": "legacy", "inputDir": "input", "outputDir": "output"},
+            [],
+        )
+        self.assertEqual(legacy.pdf_progress, {"completed": 0, "total": 0, "percent": 0})
+        self.assertEqual(legacy.spider_progress["discovered"], 0)
+
     def test_infer_log_progress_uses_completed_pdf_ratio(self) -> None:
         """
         【方法功能】验证 OCR 日志中的已完成 PDF 比例会转换为阶段内进度。
@@ -325,6 +379,8 @@ class WebJobStateTests(unittest.TestCase):
                 restored_response = client.get(f"/api/jobs/{job.job_id}")
             self.assertEqual(latest_response.status_code, 200)
             self.assertEqual(latest_response.json()["jobId"], job.job_id)
+            self.assertIn("pdfProgress", latest_response.json())
+            self.assertIn("spiderProgress", latest_response.json())
             self.assertEqual(cancel_response.status_code, 200)
             self.assertEqual(restored_response.json()["status"], "cancelled")
             self.assertFalse(restored_response.json()["canRetry"])

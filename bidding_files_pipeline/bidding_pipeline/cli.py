@@ -141,6 +141,25 @@ def non_negative_float(value: str) -> float:
     return parsed
 
 
+def non_negative_int(value: str) -> int:
+    """
+    【函数功能】解析不小于零的整数命令行参数。
+    :param value: str，待解析的文本
+    :return: int，非负整数
+    :raises argparse.ArgumentTypeError: 输入不是非负整数时触发
+    :Author: gexinyan
+    :CreateTime: 2026-07-20 10:00:00
+    Example: non_negative_int("1")
+    """
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("必须是非负整数") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("必须是非负整数")
+    return parsed
+
+
 def parse_category_list(value: str) -> tuple[str, ...]:
     """
     【函数功能】解析英文或中文逗号分隔的 OCR 类别列表并去重。
@@ -210,6 +229,24 @@ def build_argument_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--spider-timeout-seconds", type=positive_int, default=20)
     run_parser.add_argument("--spider-poll-interval-seconds", type=non_negative_float, default=5.0)
     run_parser.add_argument("--spider-max-poll-seconds", type=positive_int, default=180)
+    run_parser.add_argument(
+        "--fetch-deep-info",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="是否采集企业深度信息，默认关闭",
+    )
+    run_parser.add_argument(
+        "--fetch-bidding-detail",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="是否采集招投标详情，默认关闭",
+    )
+    run_parser.add_argument(
+        "--relation-expansion-depth",
+        type=non_negative_int,
+        default=1,
+        help="企业关联关系扩展层数，默认 1",
+    )
     run_parser.add_argument("--database", default=os.getenv("GENERAL_DB_NAME", DEFAULT_DB_NAME))
     run_parser.add_argument("--db-host", default=os.getenv("GENERAL_DB_HOST", DEFAULT_DB_HOST))
     run_parser.add_argument("--db-port", type=positive_int, default=int(os.getenv("GENERAL_DB_PORT", str(DEFAULT_DB_PORT))))
@@ -288,6 +325,9 @@ def build_pipeline_config(args: argparse.Namespace) -> PipelineConfig:
             timeout_seconds=args.spider_timeout_seconds,
             poll_interval_seconds=args.spider_poll_interval_seconds,
             max_poll_seconds=args.spider_max_poll_seconds,
+            fetch_deep_info=args.fetch_deep_info,
+            fetch_bidding_detail=args.fetch_bidding_detail,
+            relation_expansion_depth=args.relation_expansion_depth,
         ),
         report_template=Path(args.report_template),
         report_renderer=Path(args.report_renderer),

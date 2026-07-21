@@ -8,11 +8,19 @@
 from __future__ import annotations
 
 import unittest
+import threading
+import time
 from unittest.mock import patch
 
 from bidding_pipeline.database import VerificationResult
 from bidding_pipeline.records import ExtractionResult
-from bidding_pipeline.spider import CrawlDispatcher, HttpResult, SpiderClient, SpiderConfig
+from bidding_pipeline.spider import (
+    CrawlDispatcher,
+    HttpResult,
+    SpiderClient,
+    SpiderConfig,
+    SpiderTaskResult,
+)
 
 
 class SpiderTests(unittest.TestCase):
@@ -38,13 +46,20 @@ class SpiderTests(unittest.TestCase):
             results = client.crawl_document("a.pdf", ["企业A", "企业B"])
 
         self.assertEqual([item.status for item in results], ["success", "success"])
-        self.assertEqual(request_mock.call_args_list[0].args[2], {"keyword": "企业A"})
-        self.assertEqual(request_mock.call_args_list[2].args[2], {"keyword": "企业B"})
+        expected_a = {
+            "companyNames": ["企业A"],
+            "fetchDeepInfo": False,
+            "fetchBiddingDetail": False,
+            "relationExpansionDepth": 1,
+        }
+        expected_b = {**expected_a, "companyNames": ["企业B"]}
+        self.assertEqual(request_mock.call_args_list[0].args[2], expected_a)
+        self.assertEqual(request_mock.call_args_list[2].args[2], expected_b)
         self.assertEqual(results[0].database_rows, 1)
 
-    def test_batch_mode_submits_comma_joined_keyword_once(self) -> None:
+    def test_batch_mode_submits_company_names_array_once(self) -> None:
         """
-        【方法功能】验证 batch 模式按单 PDF 将企业名称用英文逗号拼接后提交。
+        【方法功能】验证 batch 模式按单 PDF 将企业名称数组一次提交。
         :return: None
         :Author: gexinyan
         :CreateTime: 2026-07-16 10:00:00
@@ -55,8 +70,98 @@ class SpiderTests(unittest.TestCase):
             results = client.crawl_document("a.pdf", ["企业A", "企业B"])
 
         self.assertEqual(len(results), 2)
-        self.assertEqual(request_mock.call_args_list[0].args[2], {"keyword": "企业A,企业B"})
+        self.assertEqual(
+            request_mock.call_args_list[0].args[2],
+            {
+                "companyNames": ["企业A", "企业B"],
+                "fetchDeepInfo": False,
+                "fetchBiddingDetail": False,
+                "relationExpansionDepth": 1,
+            },
+        )
         self.assertEqual([item.request_keyword for item in results], ["企业A,企业B", "企业A,企业B"])
+
+    def test_new_spider_options_are_sent(self) -> None:
+        """
+        【函数功能】验证深度信息、招投标详情和关系扩展层数会进入新接口请求体。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-20 10:00:00
+        """
+        client = SpiderClient(
+            SpiderConfig(
+                "http://spider",
+                fetch_deep_info=True,
+                fetch_bidding_detail=True,
+                relation_expansion_depth=2,
+                poll_interval_seconds=0,
+            )
+        )
+        success = HttpResult(200, '{"queryStatus":"SUCCESS"}', {"queryStatus": "SUCCESS"})
+        with patch.object(
+            client,
+            "_request",
+            side_effect=[HttpResult(200, "ok", None), success],
+        ) as request_mock:
+            client.crawl_document("a.pdf", ["企业A"])
+
+        self.assertEqual(
+            request_mock.call_args_list[0].args[2],
+            {
+                "companyNames": ["企业A"],
+                "fetchDeepInfo": True,
+                "fetchBiddingDetail": True,
+                "relationExpansionDepth": 2,
+            },
+        )
+
+    def test_run_id_polling_tracks_related_company_and_existing_status(self) -> None:
+        """
+        【方法功能】验证 runId 轮询会读取关联队列且已有数据优先于服务端失败状态。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-20 18:00:00
+        """
+        snapshots = []
+        client = SpiderClient(
+            SpiderConfig("http://spider", poll_interval_seconds=0),
+            run_progress_callback=snapshots.append,
+        )
+        submit = HttpResult(200, "", {"data": {"runId": "run-1", "expansionStatus": "WAITING"}})
+        run_status = HttpResult(
+            200,
+            "",
+            {
+                "data": {
+                    "runId": "run-1",
+                    "status": "COMPLETED",
+                    "rootStatus": "FAILED",
+                    "roots": [{"companyName": "企业A", "status": "FAILED", "hasData": True}],
+                    "totalNodes": 2,
+                    "databaseReuseCount": 1,
+                    "crawlSuccessCount": 1,
+                    "failedCount": 0,
+                }
+            },
+        )
+        queue = HttpResult(
+            200,
+            "",
+            {
+                "data": {
+                    "total": 1,
+                    "pageNum": 1,
+                    "pageSize": 100,
+                    "items": [{"companyId": "related-1", "companyName": "关联企业B", "depth": 1, "status": "SUCCESS", "hasData": False}],
+                }
+            },
+        )
+        with patch.object(client, "_request", side_effect=[submit, run_status, queue]):
+            results = client.crawl_document("a.pdf", ["企业A"])
+
+        self.assertEqual([(item.company_name, item.status, item.company_type) for item in results], [("企业A", "existing", "root"), ("关联企业B", "success", "related")])
+        self.assertEqual(snapshots[-1].related_total, 1)
+        self.assertEqual(snapshots[-1].expansion_status, "COMPLETED")
 
     def test_retries_server_error_before_success(self) -> None:
         """
@@ -100,13 +205,43 @@ class SpiderTests(unittest.TestCase):
                 self.pdf_path = path
                 self.records = [ExtractionResult(company_name=name) for name in names]
 
+        snapshots: list[dict[str, int | str]] = []
+        active_count = 0
+        maximum_active_count = 0
+        state_lock = threading.Lock()
+
+        def crawl_one_company(source_pdf: str, names: list[str]) -> list[SpiderTaskResult]:
+            """
+            【函数功能】模拟单企业爬虫，并记录同时执行的任务数量。
+            :param source_pdf: str，来源 PDF 路径
+            :param names: list[str]，本次提交的唯一企业名称
+            :return: list[SpiderTaskResult]，成功爬取结果
+            :Author: gexinyan
+            :CreateTime: 2026-07-17 10:30:00
+            """
+            nonlocal active_count, maximum_active_count
+            with state_lock:
+                active_count += 1
+                maximum_active_count = max(maximum_active_count, active_count)
+            time.sleep(0.01)
+            with state_lock:
+                active_count -= 1
+            status = "timeout" if names[0] == "企业C" else "success"
+            return [SpiderTaskResult(source_pdf, names[0], names[0], status, "ok")]
+
         client = SpiderClient(SpiderConfig("http://spider"))
-        with patch.object(client, "crawl_document", return_value=[]) as crawl_mock:
-            dispatcher = CrawlDispatcher(client)
+        with patch.object(client, "crawl_document", side_effect=crawl_one_company) as crawl_mock:
+            dispatcher = CrawlDispatcher(client, progress_callback=snapshots.append)
             dispatcher.on_pdf_completed(Document("first.pdf", ["企业A", "企业B"]), [])
             dispatcher.on_pdf_completed(Document("second.pdf", ["企业A", "企业C"]), [])
-            dispatcher.wait()
+            results = dispatcher.wait()
 
-        self.assertEqual(crawl_mock.call_count, 2)
-        self.assertEqual(crawl_mock.call_args_list[0].args[1], ["企业A", "企业B"])
-        self.assertEqual(crawl_mock.call_args_list[1].args[1], ["企业C"])
+        self.assertEqual(crawl_mock.call_count, 3)
+        self.assertEqual([call.args[1] for call in crawl_mock.call_args_list], [["企业A"], ["企业B"], ["企业C"]])
+        self.assertEqual(maximum_active_count, 1)
+        self.assertEqual([item.company_name for item in results], ["企业A", "企业B", "企业C"])
+        self.assertEqual([item.status for item in results], ["success", "success", "timeout"])
+        self.assertEqual(snapshots[-1]["phase"], "completed")
+        self.assertEqual(snapshots[-1]["discovered"], 3)
+        self.assertEqual(snapshots[-1]["completed"], 3)
+        self.assertEqual(snapshots[-1]["failed"], 1)

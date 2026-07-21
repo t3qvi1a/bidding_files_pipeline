@@ -106,14 +106,15 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(manifest["finalRecordCount"], 1)
             self.assertEqual(crawl["results"][0]["status"], "skipped")
 
-    def test_pipeline_runs_ocr_spider_persistence_risk_and_report_in_order(self) -> None:
+    def test_pipeline_dispatches_spider_before_ocr_finishes_then_runs_follow_up_stages(self) -> None:
         """
-        【方法功能】验证正式流程严格按 OCR、爬虫、入库、风险分析、报告顺序执行。
+        【方法功能】验证 PDF 回调即时调度爬虫，并在 OCR 与爬虫完成后才进入后续阶段。
         :return: None
         :Author: gexinyan
         :CreateTime: 2026-07-16 16:20:00
         """
         events: list[str] = []
+        structured_events: list[tuple[str, dict[str, Any]]] = []
 
         class FakeProcessingConfig:
             """
@@ -182,6 +183,7 @@ class RunnerTests(unittest.TestCase):
                 SimpleNamespace(pdf_path=Path("a.pdf"), records=[ExtractionResult(company_name="企业A")]),
                 [],
             )
+            kwargs["pdf_progress_callback"]({"completed": 1, "total": 1, "percent": 100})
             events.append("ocr-finish")
             return SimpleNamespace(to_dict=lambda: {"失败文件数": 0, "文件总数": 1})
 
@@ -253,9 +255,19 @@ class RunnerTests(unittest.TestCase):
                 patch("bidding_pipeline.runner.analyze_risks", new=fake_analyze),
                 patch("bidding_pipeline.runner.generate_report", new=fake_report),
             ):
-                run_pipeline(config, progress_callback=lambda _: None)
+                run_pipeline(
+                    config,
+                    progress_callback=lambda _: None,
+                    structured_progress_callback=lambda event_type, payload: structured_events.append(
+                        (event_type, payload)
+                    ),
+                )
 
         self.assertEqual(
             events,
-            ["ocr-start", "ocr-finish", "spider-dispatch", "spider-wait", "persist", "risk", "report"],
+            ["ocr-start", "spider-dispatch", "ocr-finish", "spider-wait", "persist", "risk", "report"],
+        )
+        self.assertEqual(
+            structured_events,
+            [("pdf_progress", {"completed": 1, "total": 1, "percent": 100})],
         )

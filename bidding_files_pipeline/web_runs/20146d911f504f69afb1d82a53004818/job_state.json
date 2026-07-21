@@ -17,7 +17,20 @@
     "completed": 0,
     "failed": 0,
     "skipped": 0,
-    "phase": "waiting_for_companies"
+    "phase": "waiting_for_companies",
+    "root": {
+      "total": 0,
+      "success": 0,
+      "failed": 0,
+      "existing": 0
+    },
+    "related": {
+      "total": 0,
+      "success": 0,
+      "failed": 0,
+      "existing": 0
+    },
+    "expansionStatus": "WAITING"
   },
   "artifacts": {
     "csv": "/home/wisdi/projects/bidding_files_utils/bidding_files_pipeline/web_runs/20146d911f504f69afb1d82a53004818/output/final.csv",

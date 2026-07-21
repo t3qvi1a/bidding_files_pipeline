@@ -144,6 +144,20 @@ def normalize_spider_progress(value: Any) -> dict[str, int | str]:
         _nonnegative_int(payload.get("queued", 0)),
         max(0, discovered - completed - running),
     )
+    def normalize_group(name: str) -> dict[str, int]:
+        """
+        【函数功能】标准化根企业或关联企业的分类状态计数。
+        :param name: str，进度对象中的分组键
+        :return: dict[str, int]，总数、成功、失败和已有数据数量
+        :Author: gexinyan
+        :CreateTime: 2026-07-20 18:00:00
+        """
+        group = payload.get(name) if isinstance(payload.get(name), dict) else {}
+        total = _nonnegative_int(group.get("total", 0))
+        success = min(_nonnegative_int(group.get("success", 0)), total)
+        failed = min(_nonnegative_int(group.get("failed", 0)), total - success)
+        existing = min(_nonnegative_int(group.get("existing", 0)), total - success - failed)
+        return {"total": total, "success": success, "failed": failed, "existing": existing}
     return {
         "discovered": discovered,
         "queued": queued,
@@ -152,6 +166,9 @@ def normalize_spider_progress(value: Any) -> dict[str, int | str]:
         "failed": min(_nonnegative_int(payload.get("failed", 0)), completed),
         "skipped": min(_nonnegative_int(payload.get("skipped", 0)), completed),
         "phase": str(payload.get("phase", "waiting_for_companies")),
+        "root": normalize_group("root"),
+        "related": normalize_group("related"),
+        "expansionStatus": str(payload.get("expansionStatus", "WAITING")),
     }
 
 

@@ -17,7 +17,20 @@
     "completed": 51,
     "failed": 17,
     "skipped": 0,
-    "phase": "completed"
+    "phase": "completed",
+    "root": {
+      "total": 0,
+      "success": 0,
+      "failed": 0,
+      "existing": 0
+    },
+    "related": {
+      "total": 0,
+      "success": 0,
+      "failed": 0,
+      "existing": 0
+    },
+    "expansionStatus": "WAITING"
   },
   "artifacts": {
     "csv": "/home/wisdi/projects/bidding_files_utils/bidding_files_pipeline/web_runs/5159a4887146451aa014e341d18c2722/output/final.csv",

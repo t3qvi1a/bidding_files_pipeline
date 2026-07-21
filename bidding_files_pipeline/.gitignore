@@ -6,5 +6,5 @@ __pycache__/
 output/
 results/
 logs/
+web_runs/
 .ocr_cache/
-

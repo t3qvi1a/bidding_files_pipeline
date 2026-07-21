@@ -124,7 +124,7 @@ class RunOutcome:
         :Author: gexinyan
         :CreateTime: 2026-07-16 10:00:00
         """
-        return sum(result.status not in {"success", "skipped"} for result in self.spider_results)
+        return sum(result.status not in {"success", "existing", "skipped"} for result in self.spider_results)
 
     @property
     def failed_ocr_count(self) -> int:
@@ -228,6 +228,9 @@ def pipeline_config_to_dict(config: PipelineConfig) -> dict[str, Any]:
             "pollIntervalSeconds": config.spider.poll_interval_seconds,
             "maxPollSeconds": config.spider.max_poll_seconds,
             "retryDelays": list(config.spider.retry_delays),
+            "fetchDeepInfo": config.spider.fetch_deep_info,
+            "fetchBiddingDetail": config.spider.fetch_bidding_detail,
+            "relationExpansionDepth": config.spider.relation_expansion_depth,
         },
         "reportRenderer": str(config.report_renderer) if config.report_renderer else None,
         "reportTemplate": str(config.report_template) if config.report_template else None,
@@ -265,14 +268,18 @@ def build_manifest(
     Example: build_manifest("run", config, {}, 0, [], None, None, None)
     """
     status_counts: dict[str, int] = {}
+    company_type_counts: dict[str, dict[str, int]] = {"root": {}, "related": {}}
     for result in spider_results:
         status_counts[result.status] = status_counts.get(result.status, 0) + 1
+        type_counts = company_type_counts.setdefault(result.company_type, {})
+        type_counts[result.status] = type_counts.get(result.status, 0) + 1
     return {
         "runId": run_id,
         "config": pipeline_config_to_dict(config),
         "ocrSummary": ocr_summary,
         "finalRecordCount": final_record_count,
         "spiderStatusCounts": status_counts,
+        "spiderCompanyTypeStatusCounts": company_type_counts,
         "spiderResultCount": len(spider_results),
         "persistence": (
             {
