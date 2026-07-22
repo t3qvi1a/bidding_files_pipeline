@@ -20,6 +20,7 @@ from .runner import (
     RunOutcome,
     default_report_renderer,
     default_report_template,
+    reconcile_output,
     run_pipeline,
 )
 from .spider import SpiderConfig
@@ -228,7 +229,30 @@ def build_argument_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--spider-base-url", default=os.getenv("SPIDER_BASE_URL", DEFAULT_SPIDER_BASE_URL))
     run_parser.add_argument("--spider-timeout-seconds", type=positive_int, default=20)
     run_parser.add_argument("--spider-poll-interval-seconds", type=non_negative_float, default=5.0)
-    run_parser.add_argument("--spider-max-poll-seconds", type=positive_int, default=180)
+    run_parser.add_argument(
+        "--spider-max-poll-seconds",
+        type=non_negative_float,
+        default=0.0,
+        help="单个运行绝对最长等待秒数；0 表示不限制",
+    )
+    run_parser.add_argument(
+        "--spider-stall-timeout-seconds",
+        type=non_negative_float,
+        default=1800.0,
+        help="连续无进度后转为待对账的秒数；0 表示不限制",
+    )
+    run_parser.add_argument(
+        "--spider-reconcile-interval-seconds",
+        type=non_negative_float,
+        default=30.0,
+        help="待对账运行的复查间隔秒数",
+    )
+    run_parser.add_argument(
+        "--spider-retryable-run-attempts",
+        type=non_negative_int,
+        default=2,
+        help="浏览器或网络类运行故障的最大重新提交次数",
+    )
     run_parser.add_argument(
         "--fetch-deep-info",
         action=argparse.BooleanOptionalAction,
@@ -280,6 +304,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=positive_int,
         default=int(os.getenv("BIDDING_WEB_PORT", str(DEFAULT_WEB_PORT))),
     )
+    reconcile_parser = subparsers.add_parser("reconcile", help="复查已有任务的待对账爬虫运行并刷新报告")
+    reconcile_parser.add_argument("--output", required=True, help="已有 Pipeline 输出目录")
     return parser
 
 
@@ -325,6 +351,9 @@ def build_pipeline_config(args: argparse.Namespace) -> PipelineConfig:
             timeout_seconds=args.spider_timeout_seconds,
             poll_interval_seconds=args.spider_poll_interval_seconds,
             max_poll_seconds=args.spider_max_poll_seconds,
+            stall_timeout_seconds=args.spider_stall_timeout_seconds,
+            reconcile_interval_seconds=args.spider_reconcile_interval_seconds,
+            retryable_run_attempts=args.spider_retryable_run_attempts,
             fetch_deep_info=args.fetch_deep_info,
             fetch_bidding_detail=args.fetch_bidding_detail,
             relation_expansion_depth=args.relation_expansion_depth,
@@ -351,6 +380,7 @@ def outcome_to_dict(outcome: RunOutcome) -> dict[str, object]:
         "finalRecordCount": outcome.final_record_count,
         "failedOcrCount": outcome.failed_ocr_count,
         "failedSpiderCount": outcome.failed_spider_count,
+        "pendingSpiderCount": outcome.pending_spider_count,
         "riskCount": outcome.risk_analysis.risk_count if outcome.risk_analysis else None,
         "riskJson": str(outcome.risk_analysis.json_path) if outcome.risk_analysis else None,
         "riskReport": str(outcome.report.pdf_path) if outcome.report else None,
@@ -376,6 +406,14 @@ def main(argv: list[str] | None = None) -> int:
 
         run_web_server(args.host, args.port)
         return 0
+    if args.command == "reconcile":
+        try:
+            audit = reconcile_output(Path(args.output))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(audit, ensure_ascii=False, indent=2))
+        return 2 if int(audit.get("pendingCount", 0)) else 0
     try:
         outcome = run_pipeline(build_pipeline_config(args))
     except Exception as exc:  # noqa: BLE001

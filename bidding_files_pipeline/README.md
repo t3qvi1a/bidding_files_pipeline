@@ -71,11 +71,14 @@ python -m bidding_pipeline run \
 
 ## 风险分析口径
 
-- 分析范围：本次 Pipeline `run_id` 写入的投标企业；
-- 分组规则：优先使用标段编号，缺失时依次使用项目编号、项目名称与标段名称兜底；
-- 数据表：`dwd_bid_extraction_results`、`spider_data_company`、`spider_data_shareholder`、`spider_data_senior_staff`；
-- 风险规则：同一标段至少两家不同企业的规范化联系电话、邮箱、股东名称或高级职员名称相同；
+- 分析范围：本次 Pipeline `run_id` 写入的投标根公司，以及这些根公司当前可见的关联企业；
+- 分组规则：优先组合项目编号与标段编号，编号缺失时使用项目名称或标段名称，项目身份缺失时按记录隔离；
+- 数据表：`dwd_bid_extraction_results`、`spider_data_person_enterprise_relation`、`spider_data_company`、`spider_data_shareholder`、`spider_data_senior_staff`；
+- 比较类别：根公司与根公司、根公司与另一根公司的关联公司、不同根公司的关联公司与关联公司；
+- 风险规则：同一标段不同根公司网络中的企业共享规范化联系电话、邮箱、股东名称、高级职员名称，或同一企业跨根公司网络出现；
+- 关系边界：关系表仅确定根公司归属，风险证据仍来自企业、股东和高级职员详情表；
 - 删除数据：`delete_flag = 'DELETE'` 的爬虫记录不参与分析；
+- 数据覆盖：未匹配到详情的根公司和关联公司会单独统计，未匹配不表示不存在风险；
 - 结论边界：风险记录是关联线索，不构成违法事实认定。
 
 ## Web 服务
@@ -97,6 +100,14 @@ python -m bidding_pipeline serve --host 0.0.0.0 --port 8096
 - 下载解析结果 CSV、风险 JSON、PDF 报告和运行日志。
 
 Web 后台使用单任务执行队列，避免多批 OCR 同时争抢服务器资源。每个任务在独立进程组中执行，状态和可重试配置持久化到 `web_runs/<job_id>/job_state.json`；刷新页面不会丢失记录，服务重启时未完成任务会明确显示为“已中断”。上传 ZIP 会拒绝路径穿越和符号链接，服务器路径受 `BIDDING_ALLOWED_INPUT_ROOTS` 限制。旧版任务未保存原始输入和运行配置，不能直接重试，需要重新选择 ZIP 或服务器路径。
+
+爬虫运行默认不设置绝对总等待时间；只有服务端状态、计数、队列和 `updateTime` 连续 1800 秒没有变化时才转为“待对账”，不会计入明确失败。Web 服务会后台复查临时结果并在终态后刷新风险 JSON、Markdown 和 PDF。也可手动执行：
+
+```bash
+python -m bidding_pipeline reconcile --output web_runs/<任务编号>/output
+```
+
+相关运行参数为 `--spider-max-poll-seconds`（默认 0，表示无绝对上限）、`--spider-stall-timeout-seconds`（默认 1800）、`--spider-reconcile-interval-seconds`（默认 30）和 `--spider-retryable-run-attempts`（默认 2）。
 
 ## 输出与退出码
 

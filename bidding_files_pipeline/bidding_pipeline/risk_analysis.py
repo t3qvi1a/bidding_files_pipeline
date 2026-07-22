@@ -13,11 +13,12 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import datetime
+from itertools import combinations
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .database import DatabaseConfig, open_connection, qualified_name
-from .records import normalize_text
+from .records import hash_values, normalize_text
 
 
 RISK_LABELS = {
@@ -25,7 +26,14 @@ RISK_LABELS = {
     "shared_email": "邮箱相同",
     "shared_shareholder": "股东名称相同",
     "shared_senior_staff": "高级职员名称相同",
+    "shared_company_identity": "企业身份重合",
 }
+COMPARISON_LABELS = {
+    "root_root": "根公司与根公司信息重合",
+    "root_related": "根公司与另一根公司的关联公司信息重合",
+    "related_related": "不同根公司的关联公司信息重合",
+}
+RELATION_TABLE = "spider_data_person_enterprise_relation"
 EMPTY_MARKERS = {"", "-", "--", "/", "无", "暂无", "未知", "未披露", "null", "none"}
 EMAIL_PATTERN = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 
@@ -147,7 +155,8 @@ def fetch_bidder_rows(config: DatabaseConfig, run_id: str) -> list[dict[str, Any
             return fetch_rows(
                 cursor,
                 f"""
-                SELECT project_name, project_code, lot_code, lot_name, company_name, award_status
+                SELECT record_id, project_name, project_code, lot_code, lot_name,
+                       company_name, award_status, source_path, category
                 FROM {target}
                 WHERE run_id = %s
                   AND company_name IS NOT NULL
@@ -185,7 +194,8 @@ def fetch_historical_project_rows(
             related_rows = fetch_rows(
                 cursor,
                 f"""
-                SELECT project_name, project_code, lot_code, lot_name, company_name, award_status
+                SELECT record_id, project_name, project_code, lot_code, lot_name,
+                       company_name, award_status, source_path, category
                 FROM {target}
                 WHERE {name_predicate}
                 """,
@@ -221,7 +231,8 @@ def fetch_historical_project_rows(
             candidate_rows = fetch_rows(
                 cursor,
                 f"""
-                SELECT project_name, project_code, lot_code, lot_name, company_name, award_status
+                SELECT record_id, project_name, project_code, lot_code, lot_name,
+                       company_name, award_status, source_path, category
                 FROM {target}
                 WHERE company_name IS NOT NULL
                   AND LENGTH(TRIM(company_name)) > 0
@@ -249,6 +260,47 @@ def _in_predicate(column: str, values: Sequence[Any]) -> tuple[str, tuple[Any, .
     if not values:
         raise ValueError("IN 查询参数不能为空")
     return f"{column} IN ({', '.join(['%s'] * len(values))})", tuple(values)
+
+
+def fetch_relation_rows(
+    config: DatabaseConfig,
+    root_company_names: Sequence[str],
+) -> list[dict[str, Any]]:
+    """
+    【函数功能】查询当前投标根公司的有效企业关系记录。
+    :param config: DatabaseConfig，爬虫结果数据库配置
+    :param root_company_names: Sequence[str]，本次运行的投标根公司名称
+    :return: list[dict[str, Any]]，带根公司、关联公司及关系路径的记录
+    :raises Exception: 数据库连接或查询失败时由驱动抛出
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 11:30:00
+    Example: fetch_relation_rows(config, ("企业A", "企业B"))
+    """
+    names = tuple(
+        dict.fromkeys(normalize_text(name) for name in root_company_names if normalize_text(name))
+    )
+    if not names:
+        return []
+    name_predicate, name_params = _in_predicate("TRIM(search_value)", names)
+    target = qualified_name(config.schema, RELATION_TABLE)
+    connection = open_connection(config)
+    try:
+        with connection.cursor() as cursor:
+            return fetch_rows(
+                cursor,
+                f"""
+                SELECT record_id, company_id, search_value, company_name,
+                       source_type, relation_type, person_name, position,
+                       holding_ratio, related_ent_id
+                FROM {target}
+                WHERE {name_predicate}
+                  AND COALESCE(delete_flag, 'NOT_DELETE') <> 'DELETE'
+                ORDER BY search_value, company_name, source_type, relation_type
+                """,
+                name_params,
+            )
+    finally:
+        connection.close()
 
 
 def fetch_spider_rows(
@@ -327,23 +379,43 @@ def fetch_spider_rows(
 
 def project_key(row: dict[str, Any]) -> tuple[str, str]:
     """
-    【函数功能】按标段编号优先规则构建项目分组键及键来源说明。
+    【函数功能】组合项目与标段标识构建防跨项目碰撞的稳定分组键。
     :param row: dict[str, Any]，投标结果记录
     :return: tuple[str, str]，稳定项目键和键来源
     :Author: gexinyan
     :CreateTime: 2026-07-16 16:20:00
-    Example: project_key({"lot_code": "L-1"})
+    Example: project_key({"project_code": "P-1", "lot_code": "L-1"})
     """
     lot_code = normalize_text(row.get("lot_code"))
+    lot_name = normalize_text(row.get("lot_name"))
     project_code = normalize_text(row.get("project_code"))
-    if lot_code:
-        return f"lot:{lot_code.casefold()}", "lot_code"
-    if project_code:
-        return f"project:{project_code.casefold()}", "project_code_fallback"
-    fallback = "|".join(
-        filter(None, (normalize_text(row.get("project_name")), normalize_text(row.get("lot_name"))))
+    project_name = normalize_text(row.get("project_name"))
+    project_source, project_value = (
+        ("project_code", project_code) if project_code else ("project_name", project_name)
     )
-    return f"name:{fallback.casefold()}", "project_name_fallback"
+    lot_source, lot_value = ("lot_code", lot_code) if lot_code else ("lot_name", lot_name)
+    if project_value and lot_value:
+        key_source = f"{project_source}_{lot_source}"
+        fingerprint = hash_values((key_source, project_value, lot_value))
+        return f"project_lot:{fingerprint}", key_source
+    if project_value:
+        key_source = f"{project_source}_fallback"
+        fingerprint = hash_values((key_source, project_value))
+        return f"project:{fingerprint}", key_source
+    record_id = normalize_text(row.get("record_id"))
+    unresolved_values = (
+        ("record_id", record_id)
+        if record_id
+        else (
+            "unresolved_record",
+            row.get("source_path"),
+            row.get("category"),
+            row.get("company_name"),
+            lot_code,
+            lot_name,
+        )
+    )
+    return f"unresolved:{hash_values(unresolved_values)}", "unresolved_record"
 
 
 def build_projects(bidder_rows: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -380,6 +452,76 @@ def build_projects(bidder_rows: Sequence[dict[str, Any]]) -> dict[str, dict[str,
     return projects
 
 
+def build_root_networks(
+    relation_rows: Sequence[dict[str, Any]],
+    root_company_names: Iterable[str],
+) -> dict[str, dict[str, Any]]:
+    """
+    【函数功能】构建以投标根公司为所有者的去重企业关系网络。
+    :param relation_rows: Sequence[dict[str, Any]]，企业关系表查询结果
+    :param root_company_names: Iterable[str]，本次运行的根公司名称
+    :return: dict[str, dict[str, Any]]，按规范化根公司名称索引的关系网络
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 11:30:00
+    Example: build_root_networks([], ("企业A",))
+    """
+    aliases = {
+        normalize_company_name(name): normalize_text(name)
+        for name in root_company_names
+        if normalize_company_name(name)
+    }
+    networks: dict[str, dict[str, Any]] = {}
+    for root_key, root_name in aliases.items():
+        networks[root_key] = {
+            "rootCompanyName": root_name,
+            "entities": {
+                root_key: {
+                    "companyKey": root_key,
+                    "companyName": root_name,
+                    "entityRole": "root",
+                    "rootCompanyKey": root_key,
+                    "rootCompanyName": root_name,
+                    "relations": [],
+                }
+            },
+        }
+    relation_signatures: dict[tuple[str, str], set[tuple[str, ...]]] = defaultdict(set)
+    for row in relation_rows:
+        root_key = normalize_company_name(row.get("search_value"))
+        related_key = normalize_company_name(row.get("company_name"))
+        if root_key not in networks or not related_key or related_key == root_key:
+            continue
+        root_name = networks[root_key]["rootCompanyName"]
+        related_name = normalize_text(row.get("company_name"))
+        entity = networks[root_key]["entities"].setdefault(
+            related_key,
+            {
+                "companyKey": related_key,
+                "companyName": related_name,
+                "entityRole": "related",
+                "rootCompanyKey": root_key,
+                "rootCompanyName": root_name,
+                "relations": [],
+            },
+        )
+        relation = {
+            "sourceTable": RELATION_TABLE,
+            "sourceType": normalize_text(row.get("source_type")),
+            "relationType": normalize_text(row.get("relation_type")),
+            "personName": normalize_text(row.get("person_name")),
+            "position": normalize_text(row.get("position")),
+            "holdingRatio": normalize_text(row.get("holding_ratio")),
+            "relatedEntityId": normalize_text(row.get("related_ent_id")),
+        }
+        signature = tuple(str(relation[key]) for key in sorted(relation))
+        signature_key = (root_key, related_key)
+        if signature in relation_signatures[signature_key]:
+            continue
+        relation_signatures[signature_key].add(signature)
+        entity["relations"].append(relation)
+    return networks
+
+
 def build_company_evidence(
     spider_rows: dict[str, list[dict[str, Any]]],
     bidder_names: Iterable[str],
@@ -400,10 +542,14 @@ def build_company_evidence(
     record_to_companies: dict[Any, set[str]] = defaultdict(set)
     matched: set[str] = set()
     for row in spider_rows.get("company", []):
-        candidates = {
-            normalize_company_name(row.get("search_value")),
-            normalize_company_name(row.get("company_name")),
-        }.intersection(alias_map)
+        company_key = normalize_company_name(row.get("company_name"))
+        search_key = normalize_company_name(row.get("search_value"))
+        if company_key in alias_map:
+            candidates = {company_key}
+        elif search_key in alias_map:
+            candidates = {search_key}
+        else:
+            candidates = set()
         for company_key in candidates:
             matched.add(company_key)
             if row.get("record_id") is not None:
@@ -422,8 +568,12 @@ def build_company_evidence(
     )
     for row_key, risk_type, value_field, detail_field, source_table in detail_specs:
         for row in spider_rows.get(row_key, []):
-            candidates = {normalize_company_name(row.get("search_value"))}.intersection(alias_map)
-            candidates.update(record_to_companies.get(row.get("record_id"), set()))
+            record_candidates = record_to_companies.get(row.get("record_id"), set())
+            candidates = set(record_candidates)
+            if not candidates:
+                candidates = {
+                    normalize_company_name(row.get("search_value"))
+                }.intersection(alias_map)
             normalized = normalize_person_name(row.get(value_field))
             if not normalized:
                 continue
@@ -444,63 +594,239 @@ def detect_risks(
     run_id: str,
     projects: dict[str, dict[str, Any]],
     company_evidence: dict[str, dict[str, list[dict[str, Any]]]],
+    root_networks: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """
-    【函数功能】识别同一标段内至少两家不同企业共享同一风险值的记录组。
+    【函数功能】识别同一标段不同根公司网络间的三类共享信息与企业身份风险。
     :param run_id: str，本次流水线运行标识
     :param projects: dict[str, dict[str, Any]]，项目与参与企业索引
     :param company_evidence: dict[str, dict[str, list[dict[str, Any]]]]，企业爬虫证据
+    :param root_networks: dict[str, dict[str, Any]] | None，根公司及关联企业网络
     :return: list[dict[str, Any]]，稳定排序后的风险记录
     :Author: gexinyan
     :CreateTime: 2026-07-16 16:20:00
     Example: detect_risks("run", projects, evidence)
     """
-    grouped_risks: dict[tuple[str, str, tuple[str, ...]], dict[str, Any]] = {}
+    grouped_risks: dict[tuple[Any, ...], dict[str, Any]] = {}
+    networks = root_networks or {}
+
+    def endpoint_view(entity: dict[str, Any], evidences: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        """
+        【函数功能】生成保留角色、根公司归属、关系路径和风险证据的比较端点。
+        :param entity: dict[str, Any]，关系网络实体
+        :param evidences: Sequence[dict[str, Any]]，命中共享值的证据
+        :return: dict[str, Any]，可写入风险 JSON 的企业端点
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 11:30:00
+        """
+        return {
+            "companyName": entity["companyName"],
+            "entityRole": entity["entityRole"],
+            "rootCompanyName": entity["rootCompanyName"],
+            "relations": list(entity.get("relations", [])),
+            "evidences": list(evidences),
+        }
+
+    def add_risk(
+        comparison_type: str,
+        risk_type: str,
+        normalized_value: str,
+        display_value: str,
+        endpoints: Sequence[tuple[dict[str, Any], Sequence[dict[str, Any]]]],
+        project: dict[str, Any],
+        rule: str,
+    ) -> None:
+        """
+        【函数功能】按根公司对、比较类型、共享值和实体对聚合风险触发项目。
+        :param comparison_type: str，root_root/root_related/related_related
+        :param risk_type: str，共享信息或企业身份风险类型
+        :param normalized_value: str，规范化共享值
+        :param display_value: str，报告展示值
+        :param endpoints: Sequence，两个带证据的比较实体
+        :param project: dict[str, Any]，触发风险的项目
+        :param rule: str，风险判断规则
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 11:30:00
+        """
+        ordered = sorted(
+            endpoints,
+            key=lambda item: (
+                item[0]["rootCompanyKey"],
+                item[0]["entityRole"],
+                item[0]["companyKey"],
+            ),
+        )
+        root_keys = tuple(sorted({item[0]["rootCompanyKey"] for item in ordered}))
+        endpoint_keys = tuple(
+            (item[0]["rootCompanyKey"], item[0]["entityRole"], item[0]["companyKey"])
+            for item in ordered
+        )
+        grouping_key = (
+            comparison_type,
+            risk_type,
+            normalized_value,
+            root_keys,
+            endpoint_keys,
+        )
+        companies = [endpoint_view(entity, evidences) for entity, evidences in ordered]
+        root_names = [
+            next(item[0]["rootCompanyName"] for item in ordered if item[0]["rootCompanyKey"] == key)
+            for key in root_keys
+        ]
+        group = grouped_risks.setdefault(
+            grouping_key,
+            {
+                "riskType": risk_type,
+                "riskLabel": RISK_LABELS[risk_type],
+                "comparisonType": comparison_type,
+                "comparisonLabel": COMPARISON_LABELS[comparison_type],
+                "riskLevel": "中",
+                "matchValue": display_value,
+                "normalizedValue": normalized_value,
+                "companyCount": len(companies),
+                "distinctCompanyCount": len({item[0]["companyKey"] for item in ordered}),
+                "rootCompanies": root_names,
+                "companies": companies,
+                "triggerProjects": [],
+                "rule": rule,
+            },
+        )
+        group["triggerProjects"].append(project_public_view(project))
+
+    def structural_evidence(entity: dict[str, Any]) -> list[dict[str, Any]]:
+        """
+        【函数功能】为同一企业跨根公司网络出现生成单条关系表结构证据。
+        :param entity: dict[str, Any]，跨网络重复出现的企业实体
+        :return: list[dict[str, Any]]，结构风险证据
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 11:30:00
+        """
+        return [
+            {
+                "normalizedValue": entity["companyKey"],
+                "displayValue": entity["companyName"],
+                "sourceTable": RELATION_TABLE,
+                "detail": "同一企业出现在不同投标根公司的关系网络中",
+            }
+        ]
+
     for project in projects.values():
         if len(project["companies"]) < 2:
             continue
-        grouped: dict[tuple[str, str], dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
-        for company_key in project["companies"]:
-            for risk_type, rows in company_evidence.get(company_key, {}).items():
-                for row in rows:
-                    grouped[(risk_type, row["normalizedValue"])][company_key].append(row)
-        for (risk_type, normalized_value), company_rows in grouped.items():
-            if len(company_rows) < 2:
+        project_networks: dict[str, dict[str, dict[str, Any]]] = {}
+        for root_key, root_name in project["companies"].items():
+            network = networks.get(root_key)
+            if network is not None:
+                project_networks[root_key] = network["entities"]
                 continue
-            company_keys = tuple(sorted(company_rows))
-            grouping_key = (risk_type, normalized_value, company_keys)
-            companies = []
-            display_value = normalized_value
-            for company_key, rows in sorted(company_rows.items(), key=lambda item: project["companies"][item[0]]):
-                display_value = rows[0].get("displayValue") or display_value
-                companies.append(
-                    {
-                        "companyName": project["companies"][company_key],
-                        "evidences": rows,
-                    }
+            project_networks[root_key] = {
+                root_key: {
+                    "companyKey": root_key,
+                    "companyName": root_name,
+                    "entityRole": "root",
+                    "rootCompanyKey": root_key,
+                    "rootCompanyName": root_name,
+                    "relations": [],
+                }
+            }
+
+        for first_root, second_root in combinations(sorted(project_networks), 2):
+            first_entities = project_networks[first_root]
+            second_entities = project_networks[second_root]
+            if first_root in second_entities:
+                first_entity = first_entities[first_root]
+                related_entity = second_entities[first_root]
+                evidence = structural_evidence(related_entity)
+                add_risk(
+                    "root_related",
+                    "shared_company_identity",
+                    first_root,
+                    first_entity["companyName"],
+                    ((first_entity, evidence), (related_entity, evidence)),
+                    project,
+                    "同一投标企业同时是另一投标根公司的关联企业",
                 )
-            group = grouped_risks.setdefault(
-                grouping_key,
-                {
-                    "riskType": risk_type,
-                    "riskLabel": RISK_LABELS[risk_type],
-                    "riskLevel": "中",
-                    "matchValue": display_value,
-                    "normalizedValue": normalized_value,
-                    "companyCount": len(companies),
-                    "companies": companies,
-                    "triggerProjects": [],
-                    "rule": "本次运行中同一标段内至少两家不同投标企业共享同一规范化信息",
-                },
-            )
-            group["triggerProjects"].append(project_public_view(project))
+            if second_root in first_entities:
+                root_entity = second_entities[second_root]
+                related_entity = first_entities[second_root]
+                evidence = structural_evidence(related_entity)
+                add_risk(
+                    "root_related",
+                    "shared_company_identity",
+                    second_root,
+                    root_entity["companyName"],
+                    ((related_entity, evidence), (root_entity, evidence)),
+                    project,
+                    "同一投标企业同时是另一投标根公司的关联企业",
+                )
+            shared_related = {
+                key
+                for key in set(first_entities).intersection(second_entities)
+                if first_entities[key]["entityRole"] == "related"
+                and second_entities[key]["entityRole"] == "related"
+            }
+            for entity_key in sorted(shared_related):
+                first_entity = first_entities[entity_key]
+                second_entity = second_entities[entity_key]
+                first_evidence = structural_evidence(first_entity)
+                second_evidence = structural_evidence(second_entity)
+                add_risk(
+                    "related_related",
+                    "shared_company_identity",
+                    entity_key,
+                    first_entity["companyName"],
+                    ((first_entity, first_evidence), (second_entity, second_evidence)),
+                    project,
+                    "同一关联企业同时出现在两家不同投标根公司的关系网络中",
+                )
+
+        inverted: dict[
+            tuple[str, str],
+            list[tuple[dict[str, Any], list[dict[str, Any]]]],
+        ] = defaultdict(list)
+        for entities in project_networks.values():
+            for entity in entities.values():
+                for risk_type, rows in company_evidence.get(entity["companyKey"], {}).items():
+                    rows_by_value: dict[str, list[dict[str, Any]]] = defaultdict(list)
+                    for row in rows:
+                        rows_by_value[row["normalizedValue"]].append(row)
+                    for normalized_value, matching_rows in rows_by_value.items():
+                        inverted[(risk_type, normalized_value)].append((entity, matching_rows))
+        for (risk_type, normalized_value), occurrences in inverted.items():
+            for first, second in combinations(occurrences, 2):
+                first_entity, first_rows = first
+                second_entity, second_rows = second
+                if first_entity["rootCompanyKey"] == second_entity["rootCompanyKey"]:
+                    continue
+                if first_entity["companyKey"] == second_entity["companyKey"]:
+                    continue
+                roles = {first_entity["entityRole"], second_entity["entityRole"]}
+                if roles == {"root"}:
+                    comparison_type = "root_root"
+                elif roles == {"related"}:
+                    comparison_type = "related_related"
+                else:
+                    comparison_type = "root_related"
+                display_value = normalize_text(
+                    first_rows[0].get("displayValue") or second_rows[0].get("displayValue")
+                ) or normalized_value
+                add_risk(
+                    comparison_type,
+                    risk_type,
+                    normalized_value,
+                    display_value,
+                    ((first_entity, first_rows), (second_entity, second_rows)),
+                    project,
+                    f"同一标段内{COMPARISON_LABELS[comparison_type]}，共享同一规范化信息",
+                )
     risks = []
-    for (_, _, company_keys), risk in grouped_risks.items():
+    for grouping_key, risk in grouped_risks.items():
         trigger_projects = sorted(
             {item["projectKey"]: item for item in risk["triggerProjects"]}.values(),
             key=lambda item: item["projectKey"],
         )
-        fingerprint = "|".join((run_id, risk["riskType"], risk["normalizedValue"], *company_keys))
+        fingerprint = "|".join((run_id, *(str(item) for item in grouping_key)))
         risks.append(
             {
                 **risk,
@@ -510,7 +836,16 @@ def detect_risks(
                 "commonProjects": [],
             }
         )
-    return sorted(risks, key=lambda item: (item["project"]["projectKey"], item["riskType"], item["normalizedValue"]))
+    return sorted(
+        risks,
+        key=lambda item: (
+            item["project"]["projectKey"],
+            item["comparisonType"],
+            item["riskType"],
+            item["normalizedValue"],
+            tuple(item["rootCompanies"]),
+        ),
+    )
 
 
 def project_public_view(project: dict[str, Any]) -> dict[str, Any]:
@@ -538,10 +873,11 @@ def build_common_projects(risk: dict[str, Any], projects: dict[str, dict[str, An
     :CreateTime: 2026-07-17 09:20:59
     Example: build_common_projects({"companies": []}, {})
     """
+    root_names = risk.get("rootCompanies") or [
+        company.get("companyName") for company in risk.get("companies", [])
+    ]
     risk_company_keys = {
-        normalize_company_name(company.get("companyName"))
-        for company in risk.get("companies", [])
-        if normalize_company_name(company.get("companyName"))
+        normalize_company_name(name) for name in root_names if normalize_company_name(name)
     }
     common_projects = []
     for project in projects.values():
@@ -585,6 +921,7 @@ def write_risk_json(
     projects: dict[str, dict[str, Any]],
     risks: Sequence[dict[str, Any]],
     matched_companies: set[str],
+    root_networks: dict[str, dict[str, Any]] | None = None,
 ) -> RiskAnalysisSummary:
     """
     【函数功能】写出完整风险 JSON，并返回可供流水线审计的汇总。
@@ -595,18 +932,31 @@ def write_risk_json(
     :param projects: dict[str, dict[str, Any]]，项目分组数据
     :param risks: Sequence[dict[str, Any]]，风险记录
     :param matched_companies: set[str]，匹配到爬虫数据的规范化企业名
+    :param root_networks: dict[str, dict[str, Any]] | None，根公司与关联企业网络
     :return: RiskAnalysisSummary，风险分析汇总
     :raises OSError: JSON 无法写入时抛出
     :Author: gexinyan
     :CreateTime: 2026-07-16 16:20:00
     Example: write_risk_json(Path("risk.json"), "run", config, "big_data", {}, [], set())
     """
-    company_names = {
+    root_company_names = {
         key: name for project in projects.values() for key, name in project["companies"].items()
     }
+    networks = root_networks or {}
+    related_company_names: dict[str, str] = {}
+    relation_count = 0
+    for root_key in root_company_names:
+        network = networks.get(root_key, {})
+        for entity_key, entity in network.get("entities", {}).items():
+            if entity.get("entityRole") != "related":
+                continue
+            related_company_names.setdefault(entity_key, entity["companyName"])
+            relation_count += len(entity.get("relations", []))
     risk_type_counts = {risk_type: 0 for risk_type in RISK_LABELS}
+    comparison_type_counts = {comparison_type: 0 for comparison_type in COMPARISON_LABELS}
     for risk in risks:
         risk_type_counts[risk["riskType"]] += 1
+        comparison_type_counts[risk["comparisonType"]] += 1
     project_items = []
     for project in projects.values():
         project_items.append(
@@ -623,9 +973,13 @@ def write_risk_json(
                 ),
             }
         )
-    unmatched_company_count = len(set(company_names).difference(matched_companies))
+    unmatched_root_keys = set(root_company_names).difference(matched_companies)
+    unmatched_related_keys = set(related_company_names).difference(matched_companies)
+    matched_root_count = len(set(root_company_names).intersection(matched_companies))
+    matched_related_count = len(set(related_company_names).intersection(matched_companies))
+    unmatched_company_count = len(unmatched_root_keys)
     payload = {
-        "schemaVersion": "1.1",
+        "schemaVersion": "2.0",
         "generatedAt": datetime.now().astimezone().isoformat(),
         "runId": run_id,
         "source": {
@@ -635,24 +989,43 @@ def write_risk_json(
             "spiderDatabase": spider_database,
             "schema": database_config.schema,
             "resultTable": database_config.table,
-            "spiderTables": ["spider_data_company", "spider_data_shareholder", "spider_data_senior_staff"],
+            "spiderTables": [
+                "spider_data_company",
+                "spider_data_shareholder",
+                "spider_data_senior_staff",
+                RELATION_TABLE,
+            ],
         },
         "summary": {
             "projectCount": len(projects),
-            "companyCount": len(company_names),
-            "matchedCompanyCount": len(matched_companies),
+            "companyCount": len(root_company_names),
+            "matchedCompanyCount": matched_root_count,
             "unmatchedCompanyCount": unmatched_company_count,
+            "rootCompanyCount": len(root_company_names),
+            "relatedCompanyCount": len(related_company_names),
+            "matchedRootCompanyCount": matched_root_count,
+            "unmatchedRootCompanyCount": unmatched_company_count,
+            "matchedRelatedCompanyCount": matched_related_count,
+            "unmatchedRelatedCompanyCount": len(unmatched_related_keys),
+            "relationCount": relation_count,
             "riskCount": len(risks),
             "riskTypeCounts": risk_type_counts,
+            "comparisonTypeCounts": comparison_type_counts,
         },
         "unmatchedCompanies": sorted(
-            company_names[key] for key in set(company_names).difference(matched_companies)
+            root_company_names[key] for key in unmatched_root_keys
+        ),
+        "unmatchedRelatedCompanies": sorted(
+            related_company_names[key] for key in unmatched_related_keys
         ),
         "projects": sorted(project_items, key=lambda item: item["projectKey"]),
         "risks": list(risks),
         "notes": [
-            "标段编号为空时依次使用项目编号、项目名称与标段名称作为分组兜底。",
-            "风险由本次运行同标段共享信息触发，共同参投项目从结果表历史记录补充。",
+            "项目分组优先组合项目编号与标段编号；编号缺失时使用项目名称或标段名称，"
+            "项目身份缺失时按记录隔离。",
+            "仅比较同一标段内不同投标根公司所属的企业网络，不比较单个根公司网络内部。",
+            "企业关系表仅用于确定关联拓扑，联系方式和人员证据来自企业详情表。",
+            "关系表没有运行标识，关联网络反映 openGauss 当前可见的有效关系数据。",
             "风险记录仅表示数据关联线索，不构成串标违法事实认定。",
         ],
     }
@@ -662,7 +1035,7 @@ def write_risk_json(
     return RiskAnalysisSummary(
         risk_count=len(risks),
         project_count=len(projects),
-        company_count=len(company_names),
+        company_count=len(root_company_names),
         unmatched_company_count=unmatched_company_count,
         json_path=output_path,
     )
@@ -692,9 +1065,18 @@ def analyze_risks(
         dict.fromkeys(project["companies"][key] for project in projects.values() for key in project["companies"])
     )
     spider_config = replace(database_config, database=spider_database)
-    spider_rows = fetch_spider_rows(spider_config, bidder_names)
-    evidence, matched_companies = build_company_evidence(spider_rows, bidder_names)
-    risks = detect_risks(run_id, projects, evidence)
+    relation_rows = fetch_relation_rows(spider_config, bidder_names)
+    root_networks = build_root_networks(relation_rows, bidder_names)
+    related_names = [
+        entity["companyName"]
+        for network in root_networks.values()
+        for entity in network["entities"].values()
+        if entity["entityRole"] == "related"
+    ]
+    entity_names = tuple(dict.fromkeys((*bidder_names, *related_names)))
+    spider_rows = fetch_spider_rows(spider_config, entity_names)
+    evidence, matched_companies = build_company_evidence(spider_rows, entity_names)
+    risks = detect_risks(run_id, projects, evidence, root_networks)
     historical_projects = build_projects(fetch_historical_project_rows(database_config, bidder_names))
     for project_key_value, current_project in projects.items():
         historical_project = historical_projects.setdefault(project_key_value, current_project)
@@ -710,4 +1092,5 @@ def analyze_risks(
         projects,
         risks,
         matched_companies,
+        root_networks,
     )

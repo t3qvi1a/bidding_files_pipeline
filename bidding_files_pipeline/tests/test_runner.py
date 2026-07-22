@@ -20,8 +20,15 @@ from bidding_pipeline.database import DatabaseConfig, PersistenceSummary
 from bidding_pipeline.records import CSV_COLUMN_MAPPING, ExtractionResult
 from bidding_pipeline.reporting import ReportSummary
 from bidding_pipeline.risk_analysis import RiskAnalysisSummary
-from bidding_pipeline.runner import OcrApi, PipelineConfig, run_pipeline
-from bidding_pipeline.spider import SpiderConfig
+from bidding_pipeline.runner import (
+    OcrApi,
+    PipelineConfig,
+    build_crawl_audit,
+    build_spider_statistics,
+    reconcile_output,
+    run_pipeline,
+)
+from bidding_pipeline.spider import SpiderConfig, SpiderTaskResult
 
 
 class RunnerTests(unittest.TestCase):
@@ -30,6 +37,81 @@ class RunnerTests(unittest.TestCase):
     :Author: gexinyan
     :CreateTime: 2026-07-16 10:00:00
     """
+
+    def test_pending_spider_results_are_not_counted_as_failures(self) -> None:
+        """
+        【方法功能】验证待提交、待对账及旧版超时统一进入 pending 而不是 failed。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 14:30:00
+        """
+        statistics = build_spider_statistics(
+            [
+                SpiderTaskResult("a.pdf", "企业A", "企业A", "pending_submission", "offline"),
+                SpiderTaskResult("b.pdf", "企业B", "企业B", "pending_reconciliation", "stalled"),
+                SpiderTaskResult("c.pdf", "企业C", "企业C", "timeout", "legacy"),
+                SpiderTaskResult("d.pdf", "企业D", "企业D", "failed", "terminal"),
+            ]
+        )
+
+        self.assertEqual(statistics["overall"]["pending"], 3)
+        self.assertEqual(statistics["overall"]["failed"], 1)
+
+    def test_reconcile_uses_root_seed_when_only_related_company_is_pending(self) -> None:
+        """
+        【方法功能】验证关联企业待对账时仍按同一 runId 的根企业查询完整运行快照。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 14:30:00
+        """
+        root_result = SpiderTaskResult("a.pdf", "根企业A", "根企业A", "success", "", run_id="run-1")
+        related_pending = SpiderTaskResult(
+            "a.pdf",
+            "关联企业B",
+            "根企业A",
+            "pending_reconciliation",
+            "stalled",
+            run_id="run-1",
+            company_type="related",
+        )
+        related_success = SpiderTaskResult(
+            "a.pdf",
+            "关联企业B",
+            "根企业A",
+            "success",
+            "",
+            run_id="run-1",
+            company_type="related",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir)
+            (output / "crawl_results.json").write_text(
+                json.dumps(build_crawl_audit("pipeline-run", [root_result, related_pending]), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (output / "run_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "runId": "pipeline-run",
+                        "config": {
+                            "skipRiskAnalysis": True,
+                            "spider": {"baseUrl": "http://spider"},
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with patch(
+                "bidding_pipeline.runner.SpiderClient.reconcile_result",
+                return_value=[root_result, related_success],
+            ) as reconcile_mock:
+                audit = reconcile_output(output)
+
+        seed = reconcile_mock.call_args.args[0]
+        self.assertEqual((seed.company_name, seed.status), ("根企业A", "pending_reconciliation"))
+        self.assertEqual(audit["crawlFinality"], "final")
+        self.assertEqual(audit["pendingCount"], 0)
 
     def test_dry_run_writes_audit_files_and_skips_external_services(self) -> None:
         """

@@ -62,7 +62,37 @@ def shared_information_label(risk: dict[str, Any]) -> str:
         "shared_email": "邮箱",
         "shared_shareholder": "股东名称",
         "shared_senior_staff": "高级职员名称",
+        "shared_company_identity": "企业名称",
     }.get(risk_type, str(risk.get("riskLabel", "共享信息")))
+
+
+def relation_summary(company: dict[str, Any]) -> str:
+    """
+    【函数功能】将企业关系路径转换为报告表格中的简短说明。
+    :param company: dict[str, Any]，风险比较企业端点
+    :return: str，根公司或关联关系说明
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 11:30:00
+    Example: relation_summary({"entityRole": "root", "relations": []})
+    """
+    if company.get("entityRole", "root") == "root":
+        return "投标根公司"
+    rows = []
+    for relation in company.get("relations", []):
+        parts = [
+            value
+            for value in (
+                relation.get("sourceType"),
+                relation.get("relationType"),
+                relation.get("personName"),
+                relation.get("position"),
+                relation.get("holdingRatio"),
+            )
+            if value
+        ]
+        if parts:
+            rows.append("/".join(str(value) for value in parts))
+    return "；".join(dict.fromkeys(rows)) or "关联企业（关系详情未披露）"
 
 
 def report_common_projects(risk: dict[str, Any]) -> list[dict[str, Any]]:
@@ -107,6 +137,13 @@ def build_template_context(payload: dict[str, Any]) -> dict[str, Any]:
     risks = payload.get("risks", [])
     projects = payload.get("projects", [])
     risk_counts = summary.get("riskTypeCounts", {})
+    comparison_counts = summary.get("comparisonTypeCounts", {})
+    if not comparison_counts:
+        comparison_counts = {
+            "root_root": sum(risk.get("comparisonType", "root_root") == "root_root" for risk in risks),
+            "root_related": sum(risk.get("comparisonType") == "root_related" for risk in risks),
+            "related_related": sum(risk.get("comparisonType") == "related_related" for risk in risks),
+        }
     risk_project_keys = {
         project.get("projectKey")
         for risk in risks
@@ -139,6 +176,11 @@ def build_template_context(payload: dict[str, Any]) -> dict[str, Any]:
             company_rows.append(
                 {
                     "企业名称": markdown_cell(company.get("companyName")),
+                    "根公司归属": markdown_cell(company.get("rootCompanyName") or company.get("companyName")),
+                    "实体角色": markdown_cell(
+                        "关联公司" if company.get("entityRole") == "related" else "根公司"
+                    ),
+                    "关联路径": markdown_cell(relation_summary(company)),
                     "数据来源": markdown_cell(
                         "、".join(sorted({item.get("sourceTable", "") for item in evidences if item.get("sourceTable")}))
                     ),
@@ -151,13 +193,23 @@ def build_template_context(payload: dict[str, Any]) -> dict[str, Any]:
             {
                 "风险序号": index,
                 "风险类型": markdown_cell(risk.get("riskLabel")),
+                "比较类别": markdown_cell(
+                    risk.get("comparisonLabel")
+                    or {
+                        "root_root": "根公司与根公司信息重合",
+                        "root_related": "根公司与另一根公司的关联公司信息重合",
+                        "related_related": "不同根公司的关联公司信息重合",
+                    }.get(risk.get("comparisonType", "root_root"), "根公司横向比对")
+                ),
                 "风险编号": markdown_cell(risk.get("riskId")),
+                "根公司组合": markdown_cell("、".join(risk.get("rootCompanies", []))),
                 "项目名称": markdown_cell(project.get("projectName")),
                 "项目编号": markdown_cell(project.get("projectCode")),
                 "标段编号": markdown_cell(project.get("lotCode")),
                 "共享信息": markdown_cell(risk.get("matchValue")),
                 "共享信息类型": markdown_cell(shared_information_label(risk)),
                 "涉及企业数": risk.get("companyCount", 0),
+                "不同企业数": risk.get("distinctCompanyCount", risk.get("companyCount", 0)),
                 "风险等级": markdown_cell(risk.get("riskLevel")),
                 "判断规则": markdown_cell(risk.get("rule")),
                 "企业证据行": company_rows,
@@ -166,6 +218,8 @@ def build_template_context(payload: dict[str, Any]) -> dict[str, Any]:
             }
         )
     unmatched = payload.get("unmatchedCompanies", [])
+    unmatched_related = payload.get("unmatchedRelatedCompanies", [])
+    related_display_limit = 100
 
     def involved_project_count(risk_type: str) -> int:
         """
@@ -190,10 +244,22 @@ def build_template_context(payload: dict[str, Any]) -> dict[str, Any]:
         "项目名称": markdown_cell(project_title),
         "生成时间": markdown_cell(payload.get("generatedAt")),
         "运行标识": markdown_cell(payload.get("runId")),
+        "爬虫数据状态": "临时结果（待对账）" if summary.get("crawlFinality") == "provisional" else "最终结果",
+        "待对账企业数": int(summary.get("pendingSpiderCount", 0)),
+        "爬虫覆盖提示": markdown_cell(summary.get("crawlCoverageNotice", "爬虫企业均已取得最终状态。")),
+        "存在待对账企业": int(summary.get("pendingSpiderCount", 0)) > 0,
+        "无待对账企业": int(summary.get("pendingSpiderCount", 0)) == 0,
         "项目总数": project_count,
         "投标企业总数": summary.get("companyCount", 0),
         "匹配企业总数": summary.get("matchedCompanyCount", 0),
         "未匹配企业总数": summary.get("unmatchedCompanyCount", 0),
+        "根公司总数": summary.get("rootCompanyCount", summary.get("companyCount", 0)),
+        "匹配根公司总数": summary.get("matchedRootCompanyCount", summary.get("matchedCompanyCount", 0)),
+        "未匹配根公司总数": summary.get("unmatchedRootCompanyCount", summary.get("unmatchedCompanyCount", 0)),
+        "关联公司总数": summary.get("relatedCompanyCount", 0),
+        "匹配关联公司总数": summary.get("matchedRelatedCompanyCount", 0),
+        "未匹配关联公司总数": summary.get("unmatchedRelatedCompanyCount", len(unmatched_related)),
+        "关系记录总数": summary.get("relationCount", 0),
         "风险线索总数": summary.get("riskCount", 0),
         "涉及风险项目数": involved_count,
         "风险项目占比": f"{(involved_count / project_count * 100) if project_count else 0:.2f}",
@@ -205,13 +271,31 @@ def build_template_context(payload: dict[str, Any]) -> dict[str, Any]:
         "共享股东涉及项目数": involved_project_count("shared_shareholder"),
         "共享高级职员风险数量": risk_counts.get("shared_senior_staff", 0),
         "共享高级职员涉及项目数": involved_project_count("shared_senior_staff"),
+        "企业身份重合风险数量": risk_counts.get("shared_company_identity", 0),
+        "根公司与根公司风险数量": comparison_counts.get("root_root", 0),
+        "根公司与关联公司风险数量": comparison_counts.get("root_related", 0),
+        "关联公司与关联公司风险数量": comparison_counts.get("related_related", 0),
         "项目行": project_rows,
+        "比较类别行": [
+            {"比较类别": label, "风险数量": comparison_counts.get(key, 0)}
+            for key, label in (
+                ("root_root", "根公司与根公司"),
+                ("root_related", "根公司与关联公司"),
+                ("related_related", "关联公司与关联公司"),
+            )
+        ],
         "存在风险": bool(risks),
         "无风险": not risks,
         "风险章节": risk_sections,
         "存在未匹配企业": bool(unmatched),
         "无未匹配企业": not unmatched,
         "未匹配企业行": [{"企业名称": markdown_cell(name)} for name in unmatched],
+        "存在未匹配关联企业": bool(unmatched_related),
+        "无未匹配关联企业": not unmatched_related,
+        "未匹配关联企业行": [
+            {"企业名称": markdown_cell(name)} for name in unmatched_related[:related_display_limit]
+        ],
+        "未匹配关联企业省略数量": max(0, len(unmatched_related) - related_display_limit),
     }
 
 

@@ -39,10 +39,19 @@ class ReportingTests(unittest.TestCase):
                 "companyCount": 2,
                 "matchedCompanyCount": 2,
                 "unmatchedCompanyCount": 0,
+                "rootCompanyCount": 2,
+                "matchedRootCompanyCount": 2,
+                "unmatchedRootCompanyCount": 0,
+                "relatedCompanyCount": 2,
+                "matchedRelatedCompanyCount": 1,
+                "unmatchedRelatedCompanyCount": 1,
+                "relationCount": 2,
                 "riskCount": 1,
                 "riskTypeCounts": {"shared_phone": 1},
+                "comparisonTypeCounts": {"root_root": 0, "root_related": 1, "related_related": 0},
             },
             "unmatchedCompanies": [],
+            "unmatchedRelatedCompanies": ["关联企业D"],
             "projects": [{
                 "projectKey": "lot:L-1",
                 "projectName": "测试项目",
@@ -55,17 +64,39 @@ class ReportingTests(unittest.TestCase):
                 "riskId": "risk-1",
                 "riskType": "shared_phone",
                 "riskLabel": "联系电话相同",
+                "comparisonType": "root_related",
+                "comparisonLabel": "根公司与另一根公司的关联公司信息重合",
+                "rootCompanies": ["企业A", "企业B"],
                 "riskLevel": "中",
                 "matchValue": "13800000000",
                 "companyCount": 2,
+                "distinctCompanyCount": 2,
                 "rule": "同标段共享信息",
                 "project": {"projectKey": "lot:L-1", "projectName": "测试项目", "projectCode": "P-1", "lotCode": "L-1"},
                 "triggerProjects": [
                     {"projectKey": "lot:L-1", "projectName": "测试项目", "projectCode": "P-1", "lotCode": "L-1"},
                 ],
                 "companies": [
-                    {"companyName": "企业A", "evidences": [{"sourceTable": "spider_data_company"}]},
-                    {"companyName": "企业B", "evidences": [{"sourceTable": "spider_data_company"}]},
+                    {
+                        "companyName": "企业A",
+                        "entityRole": "root",
+                        "rootCompanyName": "企业A",
+                        "relations": [],
+                        "evidences": [{"sourceTable": "spider_data_company"}],
+                    },
+                    {
+                        "companyName": "关联企业C",
+                        "entityRole": "related",
+                        "rootCompanyName": "企业B",
+                        "relations": [
+                            {
+                                "sourceType": "SHAREHOLDER",
+                                "relationType": "DIRECT_INVESTMENT",
+                                "personName": "张三",
+                            }
+                        ],
+                        "evidences": [{"sourceTable": "spider_data_company"}],
+                    },
                 ],
                 "commonProjects": [
                     {
@@ -99,6 +130,10 @@ class ReportingTests(unittest.TestCase):
         )
         self.assertIn("测试项目专项分析", rendered)
         self.assertIn("联系电话相同", rendered)
+        self.assertIn("根公司与另一根公司的关联公司信息重合", rendered)
+        self.assertIn("关联企业C", rendered)
+        self.assertIn("SHAREHOLDER/DIRECT_INVESTMENT/张三", rendered)
+        self.assertIn("关联企业D", rendered)
         self.assertIn("手机号：13800000000", rendered)
         self.assertIn("13800000000", rendered)
         self.assertIn("共同参与项目", rendered)
@@ -123,10 +158,19 @@ class ReportingTests(unittest.TestCase):
                 "companyCount": 2,
                 "matchedCompanyCount": 2,
                 "unmatchedCompanyCount": 0,
+                "rootCompanyCount": 2,
+                "matchedRootCompanyCount": 2,
+                "unmatchedRootCompanyCount": 0,
+                "relatedCompanyCount": 2,
+                "matchedRelatedCompanyCount": 2,
+                "unmatchedRelatedCompanyCount": 0,
+                "relationCount": 2,
                 "riskCount": 1,
                 "riskTypeCounts": {"shared_shareholder": 1},
+                "comparisonTypeCounts": {"root_root": 0, "root_related": 0, "related_related": 1},
             },
             "unmatchedCompanies": [],
+            "unmatchedRelatedCompanies": [],
             "projects": [{
                 "projectKey": "lot:L-1",
                 "projectName": "测试项目",
@@ -139,15 +183,31 @@ class ReportingTests(unittest.TestCase):
                 "riskId": "risk-pdf",
                 "riskType": "shared_shareholder",
                 "riskLabel": "股东名称相同",
+                "comparisonType": "related_related",
+                "comparisonLabel": "不同根公司的关联公司信息重合",
+                "rootCompanies": ["企业A", "企业B"],
                 "riskLevel": "中",
                 "matchValue": "共同股东",
                 "companyCount": 2,
+                "distinctCompanyCount": 2,
                 "rule": "同标段共享信息",
                 "project": {"projectKey": "lot:L-1", "projectName": "测试项目", "projectCode": "P-1", "lotCode": "L-1"},
                 "triggerProjects": [{"projectKey": "lot:L-1", "projectName": "测试项目", "projectCode": "P-1", "lotCode": "L-1"}],
                 "companies": [
-                    {"companyName": "企业A", "evidences": [{"sourceTable": "spider_data_shareholder", "detail": "20%"}]},
-                    {"companyName": "企业B", "evidences": [{"sourceTable": "spider_data_shareholder", "detail": "30%"}]},
+                    {
+                        "companyName": "关联企业C",
+                        "entityRole": "related",
+                        "rootCompanyName": "企业A",
+                        "relations": [{"sourceType": "SHAREHOLDER", "relationType": "DIRECT_INVESTMENT"}],
+                        "evidences": [{"sourceTable": "spider_data_shareholder", "detail": "20%"}],
+                    },
+                    {
+                        "companyName": "关联企业D",
+                        "entityRole": "related",
+                        "rootCompanyName": "企业B",
+                        "relations": [{"sourceType": "SENIOR_STAFF", "relationType": "ALL_COMPANY"}],
+                        "evidences": [{"sourceTable": "spider_data_shareholder", "detail": "30%"}],
+                    },
                 ],
                 "commonProjects": [{
                     "projectKey": "lot:L-1",

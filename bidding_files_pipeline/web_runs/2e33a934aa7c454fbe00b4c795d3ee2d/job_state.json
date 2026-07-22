@@ -22,13 +22,15 @@
       "total": 0,
       "success": 0,
       "failed": 0,
-      "existing": 0
+      "existing": 0,
+      "pending": 0
     },
     "related": {
       "total": 0,
       "success": 0,
       "failed": 0,
-      "existing": 0
+      "existing": 0,
+      "pending": 0
     },
     "expansionStatus": "WAITING"
   },
@@ -45,5 +47,7 @@
   "categoryMode": "all",
   "categories": [],
   "forceOcr": false,
-  "inputSummary": ""
+  "inputSummary": "",
+  "spiderRuns": [],
+  "remoteCancellation": {}
 }

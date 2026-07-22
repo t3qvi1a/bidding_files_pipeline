@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -23,10 +24,90 @@ from .records import extract_company_names, normalize_text
 SUCCESS_STATUSES = {"success", "succeeded", "finished", "finish", "completed", "done", "ok"}
 FAILED_STATUSES = {"failed", "fail", "error", "exception", "canceled", "cancelled"}
 RUNNING_STATUSES = {"running", "pending", "processing", "started", "queued", "doing", "waiting"}
+PENDING_STATUSES = {"pending_submission", "pending_reconciliation", "stale_waiting"}
 TERMINAL_ENTITY_STATUSES = {"success", "failed", "existing"}
 TERMINAL_EXPANSION_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 Verifier = Callable[[str], VerificationResult]
 SpiderProgressCallback = Callable[[dict[str, Any]], None]
+SpiderRunSubmittedCallback = Callable[[dict[str, Any]], None]
+CancellationRequested = Callable[[], bool]
+COMPANY_SUFFIXES = ("公司", "集团", "企业", "事务所", "中心")
+COMPANY_PREFIX_PATTERNS = (
+    ("rate_parenthesis", re.compile(r"^\s*费率\s*[)）]\s*")),
+    ("quoted_rate", re.compile(r"^\s*报价费率\s*[:：]\s*")),
+    ("bid_price", re.compile(r"^\s*投标报价\s*[:：]\s*")),
+    ("discount_rate", re.compile(r"^\s*下浮率\s*[:：]\s*")),
+)
+
+
+def iso_local_time(timestamp: float | None = None) -> str:
+    """
+    【函数功能】生成用于爬虫审计的本地 ISO 时间文本。
+    :param timestamp: float | None，Unix 时间戳；默认当前时间
+    :return: str，不含微秒的 ISO 时间
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 14:30:00
+    Example: iso_local_time(0)
+    """
+    value = time.time() if timestamp is None else timestamp
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(value))
+
+
+def clean_company_name(value: Any) -> tuple[str, str]:
+    """
+    【函数功能】清除企业名称前的明确表格字段残留，并验证组织名称后缀。
+    :param value: Any，OCR 提取的原始企业名称
+    :return: tuple[str, str]，可提交名称与命中的清洗规则；非法名称返回空名称
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 14:30:00
+    Example: clean_company_name("费率)江阴市水利工程公司")
+    """
+    original = normalize_text(value)
+    candidate = original
+    matched_rule = ""
+    for rule_name, pattern in COMPANY_PREFIX_PATTERNS:
+        cleaned = normalize_text(pattern.sub("", candidate, count=1))
+        if cleaned != candidate:
+            candidate = cleaned
+            matched_rule = rule_name
+            break
+    if not candidate:
+        return "", matched_rule or "invalid_company_name"
+    if matched_rule and not candidate.endswith(COMPANY_SUFFIXES):
+        return "", "invalid_company_name"
+    return candidate, matched_rule
+
+
+def run_progress_fingerprint(data: dict[str, Any], queue_items: list[dict[str, Any]]) -> str:
+    """
+    【函数功能】生成只反映服务端运行进展的稳定指纹，用于刷新停滞计时。
+    :param data: dict[str, Any]，运行状态接口数据
+    :param queue_items: list[dict[str, Any]]，关联队列节点
+    :return: str，排序后的 JSON 指纹文本
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 14:30:00
+    Example: run_progress_fingerprint({"status": "RUNNING"}, [])
+    """
+    run_fields = {
+        key: data.get(key)
+        for key in (
+            "status", "expansionStatus", "rootStatus", "updateTime", "currentDepth",
+            "totalNodes", "waitingNodes", "databaseReuseCount", "crawlSuccessCount",
+            "failedCount", "physicalTaskTotal", "physicalTaskRunning", "physicalTaskFailed",
+        )
+    }
+    queue_fields = [
+        {
+            "id": item.get("nodeId") or item.get("id"),
+            "traversalStatus": item.get("traversalStatus"),
+            "collectionStatus": item.get("collectionStatus"),
+            "queryStatus": item.get("queryStatus") or item.get("status"),
+            "retryCount": item.get("retryCount"),
+            "errorSummary": item.get("errorSummary"),
+        }
+        for item in queue_items
+    ]
+    return json.dumps({"run": run_fields, "queue": queue_fields}, ensure_ascii=False, sort_keys=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +119,11 @@ class SpiderConfig:
         submit_mode: str，single 或 batch
         timeout_seconds: int，单次 HTTP 请求超时秒数
         poll_interval_seconds: float，状态轮询间隔秒数
-        max_poll_seconds: float，单个企业最长轮询时长
+        max_poll_seconds: float，单个企业绝对最长轮询时长；0 表示不限制
+        stall_timeout_seconds: float，无进度停滞时长；0 表示不限制
+        service_outage_grace_seconds: float，服务不可用容忍时长
+        reconcile_interval_seconds: float，待对账任务复查间隔
+        retryable_run_attempts: int，可重试运行最大重提次数
         retry_delays: tuple[float, ...]，网络或 5xx 失败后的重试间隔
         fetch_deep_info: bool，是否采集企业深度信息
         fetch_bidding_detail: bool，是否采集招投标详情
@@ -51,8 +136,12 @@ class SpiderConfig:
     submit_mode: str = "single"
     timeout_seconds: int = 20
     poll_interval_seconds: float = 5.0
-    max_poll_seconds: float = 180.0
-    retry_delays: tuple[float, ...] = (5.0, 15.0)
+    max_poll_seconds: float = 0.0
+    stall_timeout_seconds: float = 1800.0
+    service_outage_grace_seconds: float = 300.0
+    reconcile_interval_seconds: float = 30.0
+    retryable_run_attempts: int = 2
+    retry_delays: tuple[float, ...] = (5.0, 15.0, 30.0, 60.0)
     fetch_deep_info: bool = False
     fetch_bidding_detail: bool = False
     relation_expansion_depth: int = 1
@@ -115,6 +204,13 @@ class SpiderTaskResult:
     company_id: str = ""
     expansion_status: str = ""
     audit_results: tuple[dict[str, Any], ...] = ()
+    pending_reason: str = ""
+    submission_time: str = ""
+    last_progress_time: str = ""
+    retry_run_ids: tuple[str, ...] = ()
+    original_company_name: str = ""
+    submitted_company_name: str = ""
+    name_cleaning_rule: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """
@@ -132,6 +228,10 @@ class SpiderTaskResult:
                 "errorMessage": self.message,
                 "hasData": self.has_data,
                 "expansionStatus": self.expansion_status,
+                "pendingReason": self.pending_reason,
+                "submissionTime": self.submission_time,
+                "lastProgressTime": self.last_progress_time,
+                "nameCleaningRule": self.name_cleaning_rule,
             },
         )
         return {
@@ -153,6 +253,13 @@ class SpiderTaskResult:
             "relatedSources": list(self.related_sources),
             "expansionStatus": self.expansion_status,
             "auditResults": list(audit_results),
+            "pendingReason": self.pending_reason,
+            "submissionTime": self.submission_time,
+            "lastProgressTime": self.last_progress_time,
+            "retryRunIds": list(self.retry_run_ids),
+            "originalCompanyName": self.original_company_name or self.company_name,
+            "submittedCompanyName": self.submitted_company_name or self.request_keyword,
+            "nameCleaningRule": self.name_cleaning_rule,
         }
 
 
@@ -220,6 +327,8 @@ class CrawlProgress:
     related_success: int = 0
     related_failed: int = 0
     related_existing: int = 0
+    root_pending: int = 0
+    related_pending: int = 0
     expansion_status: str = "WAITING"
 
     def to_dict(self) -> dict[str, Any]:
@@ -242,12 +351,14 @@ class CrawlProgress:
                 "success": self.root_success,
                 "failed": self.root_failed,
                 "existing": self.root_existing,
+                "pending": self.root_pending,
             },
             "related": {
                 "total": self.related_total,
                 "success": self.related_success,
                 "failed": self.related_failed,
                 "existing": self.related_existing,
+                "pending": self.related_pending,
             },
             "expansionStatus": self.expansion_status,
         }
@@ -482,9 +593,11 @@ def _status_counts(items: Iterable[SpiderTaskResult]) -> dict[str, int]:
     :CreateTime: 2026-07-20 18:00:00
     Example: _status_counts([])
     """
-    counts = {"success": 0, "failed": 0, "existing": 0}
+    counts = {"success": 0, "failed": 0, "existing": 0, "pending": 0}
     for item in items:
-        if item.status in {"timeout", "empty_result"}:
+        if item.status in PENDING_STATUSES or item.status == "timeout":
+            counts["pending"] += 1
+        elif item.status == "empty_result":
             counts["failed"] += 1
         elif item.status in counts:
             counts[item.status] += 1
@@ -511,6 +624,10 @@ def _result_audits(result: SpiderTaskResult) -> tuple[dict[str, Any], ...]:
             "errorMessage": result.message,
             "hasData": result.has_data,
             "expansionStatus": result.expansion_status,
+            "pendingReason": result.pending_reason,
+            "submissionTime": result.submission_time,
+            "lastProgressTime": result.last_progress_time,
+            "nameCleaningRule": result.name_cleaning_rule,
         },
     )
 
@@ -529,6 +646,9 @@ def _merge_spider_results(current: SpiderTaskResult, incoming: SpiderTaskResult)
         "existing": 6,
         "success": 5,
         "failed": 4,
+        "pending_reconciliation": 3,
+        "stale_waiting": 3,
+        "pending_submission": 3,
         "timeout": 3,
         "empty_result": 2,
         "running": 1,
@@ -554,6 +674,13 @@ def _merge_spider_results(current: SpiderTaskResult, incoming: SpiderTaskResult)
         company_id=current.company_id or incoming.company_id,
         expansion_status=preferred.expansion_status or current.expansion_status or incoming.expansion_status,
         audit_results=audit_results,
+        pending_reason=preferred.pending_reason or current.pending_reason or incoming.pending_reason,
+        submission_time=preferred.submission_time or current.submission_time or incoming.submission_time,
+        last_progress_time=preferred.last_progress_time or current.last_progress_time or incoming.last_progress_time,
+        retry_run_ids=tuple(dict.fromkeys((*current.retry_run_ids, *incoming.retry_run_ids))),
+        original_company_name=preferred.original_company_name or current.original_company_name or incoming.original_company_name,
+        submitted_company_name=preferred.submitted_company_name or current.submitted_company_name or incoming.submitted_company_name,
+        name_cleaning_rule=preferred.name_cleaning_rule or current.name_cleaning_rule or incoming.name_cleaning_rule,
     )
 
 
@@ -595,6 +722,45 @@ def consolidate_spider_results(results: Iterable[SpiderTaskResult]) -> list[Spid
     return consolidated
 
 
+def spider_result_from_dict(value: dict[str, Any]) -> SpiderTaskResult:
+    """
+    【函数功能】将 crawl_results.json 企业对象恢复为可再次对账的结果模型。
+    :param value: dict[str, Any]，企业爬虫审计对象
+    :return: SpiderTaskResult，恢复后的不可变结果
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 14:30:00
+    Example: spider_result_from_dict({"companyName": "企业A", "status": "pending_reconciliation"})
+    """
+    audits = value.get("auditResults")
+    effective_fields = value.get("effectiveFields")
+    return SpiderTaskResult(
+        source_pdf=normalize_text(value.get("sourcePdf")),
+        company_name=normalize_text(value.get("companyName")),
+        request_keyword=normalize_text(value.get("requestKeyword")),
+        status=normalize_text(value.get("status")),
+        message=normalize_text(value.get("message")),
+        attempts=int(value.get("attempts") or 0),
+        poll_count=int(value.get("pollCount") or 0),
+        database_rows=int(value.get("databaseRows") or 0),
+        effective_fields=dict(effective_fields) if isinstance(effective_fields, dict) else {},
+        run_id=normalize_text(value.get("runId")),
+        company_type=normalize_text(value.get("companyType")) or "root",
+        raw_status=normalize_text(value.get("rawStatus") or value.get("queryStatus")),
+        has_data=normalize_boolean(value.get("hasData", False)),
+        related_sources=tuple(str(item) for item in value.get("relatedSources", []) if item),
+        company_id=normalize_text(value.get("companyId")),
+        expansion_status=normalize_text(value.get("expansionStatus")),
+        audit_results=tuple(dict(item) for item in audits if isinstance(item, dict)) if isinstance(audits, list) else (),
+        pending_reason=normalize_text(value.get("pendingReason")),
+        submission_time=normalize_text(value.get("submissionTime")),
+        last_progress_time=normalize_text(value.get("lastProgressTime")),
+        retry_run_ids=tuple(str(item) for item in value.get("retryRunIds", []) if item),
+        original_company_name=normalize_text(value.get("originalCompanyName")),
+        submitted_company_name=normalize_text(value.get("submittedCompanyName")),
+        name_cleaning_rule=normalize_text(value.get("nameCleaningRule")),
+    )
+
+
 class SpiderClient:
     """
     【类功能】封装企业爬虫提交、状态轮询与可选数据库回查。
@@ -614,6 +780,8 @@ class SpiderClient:
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
         run_progress_callback: Callable[[RunProgress], None] | None = None,
+        run_submitted_callback: SpiderRunSubmittedCallback | None = None,
+        cancel_requested: CancellationRequested | None = None,
     ) -> None:
         """
         【方法功能】初始化爬虫客户端并校验提交模式。
@@ -630,11 +798,105 @@ class SpiderClient:
             raise ValueError("爬虫提交模式仅支持 single 或 batch")
         if config.relation_expansion_depth < 0:
             raise ValueError("relation_expansion_depth 不能小于 0")
+        if config.max_poll_seconds < 0 or config.stall_timeout_seconds < 0:
+            raise ValueError("轮询和停滞时长不能小于 0")
+        if config.service_outage_grace_seconds < 0 or config.retryable_run_attempts < 0:
+            raise ValueError("服务中断容忍时长和运行重试次数不能小于 0")
         self.config = config
         self.verifier = verifier
         self.sleep = sleep
         self.monotonic = monotonic
         self.run_progress_callback = run_progress_callback
+        self.run_submitted_callback = run_submitted_callback
+        self.cancel_requested = cancel_requested or (lambda: False)
+
+    def cancel_run(self, run_id: str) -> dict[str, Any]:
+        """请求爬虫服务终止指定关联扩展运行，并读取一次终态快照。
+
+        :param run_id: str，爬虫服务返回的关联扩展运行标识
+        :return: dict[str, Any]，包含请求结果、服务端状态和审计消息
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 16:10:00
+        Example: client.cancel_run("run-1")
+        """
+        normalized_run_id = normalize_text(run_id)
+        if not normalized_run_id:
+            return {"runId": "", "cancelStatus": "failed", "message": "missing_run_id"}
+        response, attempts = self._request_with_retry(
+            self._run_url(normalized_run_id) + "/cancel",
+            "POST",
+            None,
+        )
+        if not is_success_response(response):
+            message = response.error or truncate_message(response.text) or f"cancel_http_{response.status_code}"
+            return {
+                "runId": normalized_run_id,
+                "cancelStatus": "failed",
+                "message": message,
+                "attempts": attempts,
+            }
+        data = response_data(response)
+        expansion_status = normalize_text(data.get("expansionStatus") or data.get("status")).upper()
+        status_response = self._request(self._run_url(normalized_run_id), "GET", None)
+        if is_success_response(status_response):
+            status_data = response_data(status_response)
+            expansion_status = normalize_text(
+                status_data.get("expansionStatus") or status_data.get("status") or expansion_status
+            ).upper()
+        if expansion_status == "CANCELLED":
+            cancel_status = "cancelled"
+        elif expansion_status in {"COMPLETED", "FAILED"}:
+            cancel_status = "terminal"
+        else:
+            cancel_status = "requested"
+        return {
+            "runId": normalized_run_id,
+            "cancelStatus": cancel_status,
+            "expansionStatus": expansion_status,
+            "message": "" if is_success_response(status_response) else (
+                status_response.error or truncate_message(status_response.text)
+            ),
+            "attempts": attempts,
+        }
+
+    def _is_cancel_requested(self) -> bool:
+        """安全读取跨线程或跨进程传入的取消信号。
+
+        :return: bool，调用方已请求停止提交或轮询时返回 True
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 16:10:00
+        Example: client._is_cancel_requested()
+        """
+        try:
+            return bool(self.cancel_requested())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _emit_run_submitted(self, run_id: str, source_pdf: str, names: list[str], submission_time: str) -> None:
+        """在服务端创建 runId 后立即通知调用方持久化取消所需审计信息。
+
+        :param run_id: str，爬虫服务运行标识
+        :param source_pdf: str，触发本次提交的 PDF 路径
+        :param names: list[str]，本次提交的根企业名称
+        :param submission_time: str，提交时间
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 16:10:00
+        Example: client._emit_run_submitted("run-1", "a.pdf", ["企业A"], "2026-07-21T16:10:00")
+        """
+        if self.run_submitted_callback is None:
+            return
+        try:
+            self.run_submitted_callback(
+                {
+                    "runId": run_id,
+                    "sourcePdf": source_pdf,
+                    "companyNames": list(names),
+                    "submittedAt": submission_time,
+                }
+            )
+        except Exception:  # noqa: BLE001
+            return
 
     def crawl_document(self, source_pdf: str, company_names: Iterable[str]) -> list[SpiderTaskResult]:
         """
@@ -645,31 +907,91 @@ class SpiderClient:
         :Author: gexinyan
         :CreateTime: 2026-07-16 10:00:00
         """
-        names = deduplicate_names(company_names)
+        prepared: list[tuple[str, str, str]] = []
+        for original in deduplicate_names(company_names):
+            submitted, clean_rule = clean_company_name(original)
+            if not submitted:
+                prepared.append((original, "", clean_rule))
+            else:
+                prepared.append((original, submitted, clean_rule))
+        invalid = [
+            SpiderTaskResult(
+                source_pdf,
+                original,
+                "",
+                "pending_submission",
+                "invalid_company_name_requires_review",
+                pending_reason=rule,
+                name_cleaning_rule=rule,
+                original_company_name=original,
+                submitted_company_name="",
+                submission_time=iso_local_time(),
+            )
+            for original, submitted, rule in prepared
+            if not submitted
+        ]
+        names = deduplicate_names(submitted for _, submitted, _ in prepared if submitted)
         if not names:
-            return []
+            return invalid
         if self.config.submit_mode == "batch":
-            return self._submit_keyword(source_pdf, names, ",".join(names))
-        results: list[SpiderTaskResult] = []
-        for name in names:
-            results.extend(self._submit_keyword(source_pdf, [name], name))
-        return results
+            results = self._submit_keyword(source_pdf, names, ",".join(names))
+        else:
+            results = []
+            for name in names:
+                results.extend(self._submit_keyword(source_pdf, [name], name))
+        originals = {submitted.casefold(): (original, rule) for original, submitted, rule in prepared if submitted}
+        annotated = []
+        for item in results:
+            if item.company_type == "root":
+                original, rule = originals.get(item.request_keyword.casefold(), (item.company_name, ""))
+                submitted_name = item.request_keyword
+            else:
+                original, rule = item.company_name, ""
+                submitted_name = item.company_name
+            annotated.append(
+                replace(
+                    item,
+                    original_company_name=original,
+                    submitted_company_name=submitted_name,
+                    pending_reason=item.pending_reason,
+                    name_cleaning_rule=item.name_cleaning_rule or rule,
+                )
+            )
+        return invalid + annotated
 
     def _submit_keyword(
         self,
         source_pdf: str,
         names: list[str],
         keyword: str,
+        run_retry: int = 0,
     ) -> list[SpiderTaskResult]:
         """
         【方法功能】提交 keyword 并对其中每家企业独立轮询状态。
         :param source_pdf: str，触发爬虫的 PDF 路径
         :param names: list[str]，本次 keyword 包含的企业名称
         :param keyword: str，提交给爬虫接口的 keyword
+        :param run_retry: int，因可重试服务故障重新提交的次数
         :return: list[SpiderTaskResult]，对应企业的结果列表
         :Author: gexinyan
         :CreateTime: 2026-07-16 10:00:00
         """
+        submission_time = iso_local_time()
+        if self._is_cancel_requested():
+            return [
+                SpiderTaskResult(
+                    source_pdf,
+                    name,
+                    keyword,
+                    "skipped",
+                    "pipeline_cancel_requested_before_submission",
+                    company_type="root",
+                    submission_time=submission_time,
+                    original_company_name=name,
+                    submitted_company_name=name,
+                )
+                for name in names
+            ]
         response, attempts = self._request_with_retry(
             self._crawl_url,
             "POST",
@@ -683,13 +1005,168 @@ class SpiderClient:
         if not is_success_response(response):
             message = response.error or truncate_message(response.text) or f"trigger_http_{response.status_code}"
             return [
-                SpiderTaskResult(source_pdf, name, keyword, "failed", message, attempts=attempts)
+                SpiderTaskResult(
+                    source_pdf, name, keyword, "pending_submission", message, attempts=attempts,
+                    pending_reason="crawler_submission_unavailable", submission_time=submission_time,
+                    original_company_name=name, submitted_company_name=name,
+                )
                 for name in names
             ]
         run_id = normalize_text(response_data(response).get("runId"))
         if run_id:
-            return self._poll_run(source_pdf, names, keyword, run_id, attempts)
-        return [self._poll_company(source_pdf, name, keyword, attempts) for name in names]
+            self._emit_run_submitted(run_id, source_pdf, names, submission_time)
+            if self._is_cancel_requested():
+                return [
+                    SpiderTaskResult(
+                        source_pdf,
+                        name,
+                        keyword,
+                        "skipped",
+                        "pipeline_cancel_requested_after_submission",
+                        attempts=attempts,
+                        run_id=run_id,
+                        company_type="root",
+                        expansion_status="CANCELLING",
+                        submission_time=submission_time,
+                        original_company_name=name,
+                        submitted_company_name=name,
+                    )
+                    for name in names
+                ]
+            results = self._poll_run(source_pdf, names, keyword, run_id, attempts, submission_time)
+            if (
+                not self._is_cancel_requested()
+                and run_retry < self.config.retryable_run_attempts
+                and self._should_retry_run(results, run_retry)
+            ):
+                cooldowns = (30.0, 120.0)
+                self.sleep(cooldowns[min(run_retry, len(cooldowns) - 1)])
+                retried = self._submit_keyword(source_pdf, names, keyword, run_retry + 1)
+                return [
+                    replace(item, retry_run_ids=tuple(dict.fromkeys((run_id, *item.retry_run_ids))))
+                    for item in consolidate_spider_results((*results, *retried))
+                ]
+            return results
+        if response.json_body is None:
+            return [self._poll_company(source_pdf, name, keyword, attempts) for name in names]
+        return [
+            SpiderTaskResult(
+                source_pdf, name, keyword, "pending_submission", "crawler_returned_no_run_id",
+                attempts=attempts, pending_reason="missing_run_id", submission_time=submission_time,
+                original_company_name=name, submitted_company_name=name,
+            )
+            for name in names
+        ]
+
+    def _should_retry_run(self, results: list[SpiderTaskResult], run_retry: int = 0) -> bool:
+        """
+        【方法功能】识别浏览器、网络和疑似系统性搜索失败，限制整根企业重新提交。
+        :param results: list[SpiderTaskResult]，当前服务运行返回的企业结果
+        :param run_retry: int，当前已经执行的运行级重试次数
+        :return: bool，存在可重试运行级故障时返回 True
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 14:30:00
+        Example: client._should_retry_run([])
+        """
+        messages = "\n".join(item.message for item in results if item.message).casefold()
+        retryable_markers = (
+            "targetclosederror",
+            "target page, context or browser has been closed",
+            "err_network_changed",
+            "浏览器会话启动失败",
+        )
+        if any(marker in messages for marker in retryable_markers):
+            return True
+        failed = [item for item in results if item.status == "failed"]
+        if len(failed) < 3:
+            return run_retry == 0 and len(failed) == 1 and "搜索无结果" in failed[0].message
+        no_result_count = sum("搜索无结果" in item.message for item in failed)
+        return run_retry == 0 and no_result_count / len(failed) >= 0.8
+
+    def reconcile_result(self, result: SpiderTaskResult) -> list[SpiderTaskResult]:
+        """
+        【方法功能】对一条待对账结果执行一次非阻塞提交或状态复查。
+        :param result: SpiderTaskResult，待提交、待对账或旧版超时结果
+        :return: list[SpiderTaskResult]，本次复查得到的根企业及关联企业快照
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 14:30:00
+        Example: client.reconcile_result(result)
+        """
+        if result.status not in PENDING_STATUSES and result.status != "timeout":
+            return [result]
+        run_id = result.run_id
+        submission_time = result.submission_time or iso_local_time()
+        if not run_id:
+            submitted = result.submitted_company_name or result.request_keyword or result.company_name
+            response, attempts = self._request_with_retry(
+                self._crawl_url,
+                "POST",
+                {
+                    "companyNames": [submitted],
+                    "fetchDeepInfo": self.config.fetch_deep_info,
+                    "fetchBiddingDetail": self.config.fetch_bidding_detail,
+                    "relationExpansionDepth": self.config.relation_expansion_depth,
+                },
+            )
+            run_id = normalize_text(response_data(response).get("runId")) if is_success_response(response) else ""
+            if not run_id:
+                message = response.error or truncate_message(response.text) or "crawler_submission_unavailable"
+                return [
+                    replace(
+                        result,
+                        status="pending_submission",
+                        message=message,
+                        attempts=result.attempts + attempts,
+                        pending_reason="crawler_submission_unavailable",
+                        submission_time=submission_time,
+                    )
+                ]
+        response, _ = self._request_with_retry(self._run_url(run_id), "GET", None)
+        if not is_success_response(response):
+            message = response.error or truncate_message(response.text) or f"run_status_http_{response.status_code}"
+            return [
+                replace(
+                    result,
+                    status="pending_reconciliation",
+                    run_id=run_id,
+                    message=message,
+                    pending_reason="run_status_unavailable",
+                    submission_time=submission_time,
+                )
+            ]
+        data = response_data(response)
+        queue_items = self._read_run_queue(run_id)
+        roots = [result.submitted_company_name or result.request_keyword or result.company_name]
+        progress = self._build_run_progress(result.source_pdf, roots, roots[0], run_id, data, queue_items)
+        expansion_status = progress.expansion_status
+        last_progress_time = normalize_text(data.get("updateTime")) or iso_local_time()
+        if expansion_status in {"FAILED", "CANCELLED"}:
+            return self._finalize_run_results(
+                progress,
+                result.attempts,
+                result.poll_count + 1,
+                unresolved_status="failed",
+                unresolved_message=f"relation_expansion_{expansion_status.casefold()}",
+                submission_time=submission_time,
+                last_progress_time=last_progress_time,
+            )
+        if expansion_status == "COMPLETED" and self._run_entities_terminal(progress):
+            return self._finalize_run_results(
+                progress,
+                result.attempts,
+                result.poll_count + 1,
+                submission_time=submission_time,
+                last_progress_time=last_progress_time,
+            )
+        return self._finalize_run_results(
+            progress,
+            result.attempts,
+            result.poll_count + 1,
+            unresolved_status="pending_reconciliation",
+            unresolved_message="relation_expansion_in_progress",
+            submission_time=submission_time,
+            last_progress_time=last_progress_time,
+        )
 
     def _poll_run(
         self,
@@ -698,6 +1175,7 @@ class SpiderClient:
         keyword: str,
         run_id: str,
         attempts: int,
+        submission_time: str = "",
     ) -> list[SpiderTaskResult]:
         """
         【方法功能】按 runId 轮询根企业及关联企业扩展任务，直至服务端扩展任务结束。
@@ -706,35 +1184,42 @@ class SpiderClient:
         :param keyword: str，兼容旧审计字段的提交名称
         :param run_id: str，服务端关联扩展任务标识
         :param attempts: int，提交请求尝试次数
+        :param submission_time: str，当前服务运行提交时间
         :return: list[SpiderTaskResult]，根企业及已返回的关联企业终态结果
         :Author: gexinyan
         :CreateTime: 2026-07-20 18:00:00
         """
-        deadline = self.monotonic() + self.config.max_poll_seconds
+        start_time = self.monotonic()
+        last_progress_at = start_time
+        last_progress_text = submission_time or iso_local_time()
+        outage_started_at: float | None = None
+        previous_fingerprint = ""
         poll_count = 0
         latest: RunProgress | None = None
-        while self.monotonic() <= deadline:
+        last_error = ""
+        while True:
+            now = self.monotonic()
+            if self._is_cancel_requested():
+                break
+            if self.config.max_poll_seconds > 0 and now - start_time >= self.config.max_poll_seconds:
+                break
             response, _ = self._request_with_retry(self._run_url(run_id), "GET", None)
             poll_count += 1
             if not is_success_response(response):
-                if latest is not None:
-                    return self._finalize_run_results(
-                        latest,
-                        attempts,
-                        poll_count,
-                        unresolved_status="failed",
-                        unresolved_message=response.error or truncate_message(response.text) or f"run_status_http_{response.status_code}",
-                    )
-                return [
-                    SpiderTaskResult(
-                        source_pdf, name, keyword, "failed",
-                        response.error or truncate_message(response.text) or f"run_status_http_{response.status_code}",
-                        attempts, poll_count, run_id=run_id, company_type="root",
-                    )
-                    for name in root_names
-                ]
+                last_error = response.error or truncate_message(response.text) or f"run_status_http_{response.status_code}"
+                outage_started_at = outage_started_at or now
+                if now - outage_started_at >= self.config.service_outage_grace_seconds:
+                    break
+                self.sleep(self.config.poll_interval_seconds)
+                continue
+            outage_started_at = None
             data = response_data(response)
             queue_items = self._read_run_queue(run_id)
+            fingerprint = run_progress_fingerprint(data, queue_items)
+            if fingerprint != previous_fingerprint:
+                previous_fingerprint = fingerprint
+                last_progress_at = now
+                last_progress_text = normalize_text(data.get("updateTime")) or iso_local_time()
             latest = self._build_run_progress(source_pdf, root_names, keyword, run_id, data, queue_items)
             self._emit_run_progress(latest)
             if latest.expansion_status in {"FAILED", "CANCELLED"}:
@@ -744,22 +1229,42 @@ class SpiderClient:
                     poll_count,
                     unresolved_status="failed",
                     unresolved_message=f"relation_expansion_{latest.expansion_status.casefold()}",
+                    submission_time=submission_time,
+                    last_progress_time=last_progress_text,
                 )
             if latest.expansion_status == "COMPLETED" and self._run_entities_terminal(latest):
-                return self._finalize_run_results(latest, attempts, poll_count)
-            if self.monotonic() + self.config.poll_interval_seconds > deadline:
+                return self._finalize_run_results(
+                    latest, attempts, poll_count, submission_time=submission_time,
+                    last_progress_time=last_progress_text,
+                )
+            if self.config.stall_timeout_seconds > 0 and now - last_progress_at >= self.config.stall_timeout_seconds:
                 break
             self.sleep(self.config.poll_interval_seconds)
         if latest is not None:
+            pending_status = "pending_reconciliation"
+            if (
+                latest.expansion_status == "WAITING"
+                and int(data.get("totalNodes") or 0) == 0
+                and not normalize_text(data.get("startTime"))
+            ):
+                pending_status = "stale_waiting"
             return self._finalize_run_results(
                 latest,
                 attempts,
                 poll_count,
-                unresolved_status="timeout",
-                unresolved_message="relation_expansion_timeout",
+                unresolved_status=pending_status,
+                unresolved_message=last_error or "relation_expansion_stalled",
+                submission_time=submission_time,
+                last_progress_time=last_progress_text,
             )
         return [
-            SpiderTaskResult(source_pdf, name, keyword, "timeout", "relation_expansion_timeout", attempts, poll_count, run_id=run_id, company_type="root")
+            SpiderTaskResult(
+                source_pdf, name, keyword, "pending_reconciliation",
+                last_error or "relation_expansion_stalled", attempts, poll_count,
+                run_id=run_id, company_type="root", pending_reason="run_status_unavailable",
+                submission_time=submission_time, last_progress_time=last_progress_text,
+                original_company_name=name, submitted_company_name=name,
+            )
             for name in root_names
         ]
 
@@ -862,7 +1367,7 @@ class SpiderClient:
                     name,
                     keyword,
                     status,
-                    entity_error_message(queue_row) or entity_error_message(row),
+                    entity_error_message(queue_row) or entity_error_message(row) or entity_error_message(data),
                     run_id=run_id,
                     company_type="root",
                     raw_status=raw_status,
@@ -1001,6 +1506,8 @@ class SpiderClient:
         poll_count: int,
         unresolved_status: str = "",
         unresolved_message: str = "",
+        submission_time: str = "",
+        last_progress_time: str = "",
     ) -> list[SpiderTaskResult]:
         """
         【方法功能】为已结束的关联扩展任务补齐请求尝试次数和轮询次数。
@@ -1009,16 +1516,22 @@ class SpiderClient:
         :param poll_count: int，轮询次数
         :param unresolved_status: str，非终态企业的强制结束状态
         :param unresolved_message: str，非终态企业的结束原因
-        :return: list[SpiderTaskResult]，终态企业结果
+        :param submission_time: str，当前服务运行提交时间
+        :param last_progress_time: str，最后一次观察到进展的时间
+        :return: list[SpiderTaskResult]，终态或待对账企业结果
         :Author: gexinyan
         :CreateTime: 2026-07-20 18:00:00
         """
         results: list[SpiderTaskResult] = []
-        final_expansion_status = "FAILED" if unresolved_status else progress.expansion_status
+        final_expansion_status = progress.expansion_status
+        if unresolved_status in PENDING_STATUSES:
+            final_expansion_status = "PENDING_RECONCILIATION"
+        elif unresolved_status:
+            final_expansion_status = "FAILED"
         for item in progress.entities:
             update_status = unresolved_status if unresolved_status and item.status not in TERMINAL_ENTITY_STATUSES else item.status
             update_message = item.message
-            if update_status != item.status and unresolved_message:
+            if unresolved_message and (update_status != item.status or not update_message):
                 update_message = "; ".join(part for part in (item.message, unresolved_message) if part)
             audit_source = replace(item, expansion_status=progress.expansion_status)
             results.append(
@@ -1030,6 +1543,11 @@ class SpiderClient:
                     poll_count=poll_count,
                     expansion_status=final_expansion_status,
                     audit_results=_result_audits(audit_source),
+                    pending_reason=unresolved_message if update_status in PENDING_STATUSES else item.pending_reason,
+                    submission_time=submission_time or item.submission_time,
+                    last_progress_time=last_progress_time or item.last_progress_time,
+                    original_company_name=item.original_company_name or item.company_name,
+                    submitted_company_name=item.submitted_company_name or item.request_keyword,
                 )
             )
         roots = [item for item in results if item.company_type == "root"]
@@ -1081,7 +1599,8 @@ class SpiderClient:
         :Author: gexinyan
         :CreateTime: 2026-07-16 10:00:00
         """
-        deadline = self.monotonic() + self.config.max_poll_seconds
+        wait_seconds = self.config.max_poll_seconds or self.config.stall_timeout_seconds
+        deadline = self.monotonic() + wait_seconds
         poll_count = 0
         last_message = ""
         while self.monotonic() <= deadline:
@@ -1291,6 +1810,7 @@ class CrawlDispatcher:
         client: SpiderClient | None,
         enabled: bool = True,
         progress_callback: SpiderProgressCallback | None = None,
+        cancel_requested: CancellationRequested | None = None,
     ) -> None:
         """
         【方法功能】初始化单线程爬虫调度器，保证默认逐企业提交不会并发压垮服务。
@@ -1309,6 +1829,7 @@ class CrawlDispatcher:
             else None
         )
         self._progress_callback = progress_callback
+        self._cancel_requested = cancel_requested or (lambda: False)
         self._lock = threading.RLock()
         self._futures: list[tuple[str, str, Future[list[SpiderTaskResult]]]] = []
         self._completed: list[SpiderTaskResult] = []
@@ -1328,6 +1849,8 @@ class CrawlDispatcher:
         :Author: gexinyan
         :CreateTime: 2026-07-16 10:00:00
         """
+        if self._is_cancel_requested():
+            return
         source_pdf = str(document.pdf_path)
         names = [name for name in extract_company_names(document.records) if self._mark_new_name(name)]
         if not names:
@@ -1357,6 +1880,8 @@ class CrawlDispatcher:
             self._emit_progress()
             return
         for name in names:
+            if self._is_cancel_requested():
+                break
             with self._lock:
                 self._progress = replace(self._progress, queued=self._progress.queued + 1)
             future = self._executor.submit(self._crawl_company, source_pdf, name)
@@ -1414,6 +1939,22 @@ class CrawlDispatcher:
         :Author: gexinyan
         :CreateTime: 2026-07-17 10:30:00
         """
+        if self._is_cancel_requested():
+            results = [
+                SpiderTaskResult(
+                    source_pdf,
+                    company_name,
+                    company_name,
+                    "skipped",
+                    "pipeline_cancel_requested_before_crawl",
+                    company_type="root",
+                    submission_time=iso_local_time(),
+                    original_company_name=company_name,
+                    submitted_company_name=company_name,
+                )
+            ]
+            self._finish_company(results)
+            return results
         with self._lock:
             self._progress = replace(
                 self._progress,
@@ -1452,6 +1993,19 @@ class CrawlDispatcher:
         self._finish_company(results)
         return results
 
+    def _is_cancel_requested(self) -> bool:
+        """安全读取当前 Pipeline 的共享取消信号。
+
+        :return: bool，收到取消请求时返回 True
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 16:10:00
+        Example: dispatcher._is_cancel_requested()
+        """
+        try:
+            return bool(self._cancel_requested())
+        except Exception:  # noqa: BLE001
+            return False
+
     def _finish_company(self, results: list[SpiderTaskResult]) -> None:
         """
         【方法功能】将一个企业任务的终态结果折算到线程安全的爬虫进度快照。
@@ -1460,7 +2014,7 @@ class CrawlDispatcher:
         :Author: gexinyan
         :CreateTime: 2026-07-17 10:30:00
         """
-        failed = any(item.status in {"failed", "timeout"} for item in results if item.company_type == "root")
+        failed = any(item.status == "failed" for item in results if item.company_type == "root")
         skipped = any(item.status == "skipped" for item in results)
         with self._lock:
             run_progress_known = any(item.run_id and item.run_id in self._run_progresses for item in results)
@@ -1482,9 +2036,11 @@ class CrawlDispatcher:
                     root_success=self._progress.root_success + root_counts["success"],
                     root_failed=self._progress.root_failed + root_counts["failed"],
                     root_existing=self._progress.root_existing + root_counts["existing"],
+                    root_pending=self._progress.root_pending + root_counts["pending"],
                     related_success=self._progress.related_success + related_counts["success"],
                     related_failed=self._progress.related_failed + related_counts["failed"],
                     related_existing=self._progress.related_existing + related_counts["existing"],
+                    related_pending=self._progress.related_pending + related_counts["pending"],
                 )
         self._emit_progress()
 
@@ -1512,26 +2068,32 @@ class CrawlDispatcher:
             related_success = related_counts["success"]
             related_failed = related_counts["failed"]
             related_existing = related_counts["existing"]
+            related_pending = related_counts["pending"]
             root_success = sum(item.root_success for item in runs)
             root_failed = sum(item.root_failed for item in runs)
             root_existing = sum(item.root_existing for item in runs)
+            root_pending = sum(_status_counts(entity for entity in item.entities if entity.company_type == "root")["pending"] for item in runs)
             phases = {item.expansion_status for item in runs}
             expansion_status = (
                 "FAILED" if "FAILED" in phases else "RUNNING" if "RUNNING" in phases
-                else "WAITING" if "WAITING" in phases else "COMPLETED"
+                else "WAITING" if "WAITING" in phases
+                else "PENDING_RECONCILIATION" if "PENDING_RECONCILIATION" in phases
+                else "COMPLETED"
             )
             self._progress = replace(
                 self._progress,
                 discovered=self._progress.root_total + related_total,
-                completed=root_success + root_failed + root_existing + related_success + related_failed + related_existing,
+                completed=root_success + root_failed + root_existing + root_pending + related_success + related_failed + related_existing + related_pending,
                 failed=root_failed + related_failed,
                 root_success=root_success,
                 root_failed=root_failed,
                 root_existing=root_existing,
+                root_pending=root_pending,
                 related_total=related_total,
                 related_success=related_success,
                 related_failed=related_failed,
                 related_existing=related_existing,
+                related_pending=related_pending,
                 expansion_status=expansion_status,
             )
         self._emit_progress()

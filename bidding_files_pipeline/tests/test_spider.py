@@ -10,6 +10,7 @@ from __future__ import annotations
 import unittest
 import threading
 import time
+from typing import Any
 from unittest.mock import patch
 
 from bidding_pipeline.database import VerificationResult
@@ -22,6 +23,7 @@ from bidding_pipeline.spider import (
     SpiderConfig,
     SpiderTaskResult,
     consolidate_spider_results,
+    clean_company_name,
 )
 
 
@@ -124,7 +126,7 @@ class SpiderTests(unittest.TestCase):
         :Author: gexinyan
         :CreateTime: 2026-07-20 18:00:00
         """
-        snapshots = []
+        snapshots: list[RunProgress] = []
         client = SpiderClient(
             SpiderConfig("http://spider", poll_interval_seconds=0),
             run_progress_callback=snapshots.append,
@@ -362,7 +364,7 @@ class SpiderTests(unittest.TestCase):
                 self.pdf_path = path
                 self.records = [ExtractionResult(company_name=name) for name in names]
 
-        snapshots: list[dict[str, int | str]] = []
+        snapshots: list[dict[str, Any]] = []
         active_count = 0
         maximum_active_count = 0
         state_lock = threading.Lock()
@@ -401,4 +403,201 @@ class SpiderTests(unittest.TestCase):
         self.assertEqual(snapshots[-1]["phase"], "completed")
         self.assertEqual(snapshots[-1]["discovered"], 3)
         self.assertEqual(snapshots[-1]["completed"], 3)
-        self.assertEqual(snapshots[-1]["failed"], 1)
+        self.assertEqual(snapshots[-1]["failed"], 0)
+        self.assertEqual(snapshots[-1]["root"]["pending"], 1)
+
+    def test_company_name_cleanup_preserves_original_and_removes_rate_prefix(self) -> None:
+        """
+        【方法功能】验证爬虫提交名称清除费率表格残留且普通名称保持不变。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 14:30:00
+        """
+        self.assertEqual(clean_company_name("费率)江阴市水利工程公司"), ("江阴市水利工程公司", "rate_parenthesis"))
+        self.assertEqual(clean_company_name("企业A"), ("企业A", ""))
+
+    def test_static_run_becomes_pending_instead_of_failed(self) -> None:
+        """
+        【方法功能】验证无进度运行超过停滞窗口后进入待对账且不计为失败。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 14:30:00
+        """
+        current = [0.0]
+
+        def monotonic() -> float:
+            """
+            【函数功能】返回可由测试等待函数推进的单调时间。
+            :return: float，当前测试时间
+            :Author: gexinyan
+            :CreateTime: 2026-07-21 14:30:00
+            """
+            return current[0]
+
+        def sleep(seconds: float) -> None:
+            """
+            【函数功能】推进测试单调时间而不执行真实等待。
+            :param seconds: float，推进秒数
+            :return: None
+            :Author: gexinyan
+            :CreateTime: 2026-07-21 14:30:00
+            """
+            current[0] += seconds
+
+        client = SpiderClient(
+            SpiderConfig(
+                "http://spider",
+                poll_interval_seconds=1,
+                max_poll_seconds=0,
+                stall_timeout_seconds=2,
+                retry_delays=(),
+                retryable_run_attempts=0,
+            ),
+            sleep=sleep,
+            monotonic=monotonic,
+        )
+        run_status = HttpResult(
+            200,
+            "",
+            {"data": {"status": "WAITING", "rootStatus": "WAITING", "roots": [{"companyName": "企业A", "status": "WAITING"}]}},
+        )
+        empty_queue = HttpResult(200, "", {"data": {"total": 0, "items": []}})
+        with patch.object(client, "_request", side_effect=[run_status, empty_queue] * 3):
+            results = client._poll_run("a.pdf", ["企业A"], "企业A", "run-1", 1, "2026-07-21T14:30:00")
+
+        self.assertEqual([item.status for item in results], ["stale_waiting"])
+        self.assertEqual(results[0].pending_reason, "relation_expansion_stalled")
+
+    def test_progress_heartbeat_can_run_longer_than_stall_timeout(self) -> None:
+        """
+        【方法功能】验证持续变化的服务端心跳允许总耗时超过停滞窗口并最终成功。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 14:30:00
+        """
+        current = [0.0]
+
+        def monotonic() -> float:
+            """
+            【函数功能】返回当前测试单调时间。
+            :return: float，当前测试时间
+            :Author: gexinyan
+            :CreateTime: 2026-07-21 14:30:00
+            """
+            return current[0]
+
+        def sleep(seconds: float) -> None:
+            """
+            【函数功能】推进测试时间以模拟长时间运行。
+            :param seconds: float，推进秒数
+            :return: None
+            :Author: gexinyan
+            :CreateTime: 2026-07-21 14:30:00
+            """
+            current[0] += seconds
+
+        client = SpiderClient(
+            SpiderConfig(
+                "http://spider",
+                poll_interval_seconds=1,
+                max_poll_seconds=0,
+                stall_timeout_seconds=2,
+                retry_delays=(),
+                retryable_run_attempts=0,
+            ),
+            sleep=sleep,
+            monotonic=monotonic,
+        )
+        states = [
+            HttpResult(200, "", {"data": {"status": "WAITING", "updateTime": "t1", "roots": [{"companyName": "企业A", "status": "WAITING"}]}}),
+            HttpResult(200, "", {"data": {"status": "RUNNING", "updateTime": "t2", "roots": [{"companyName": "企业A", "status": "RUNNING"}]}}),
+            HttpResult(200, "", {"data": {"status": "RUNNING", "updateTime": "t3", "roots": [{"companyName": "企业A", "status": "RUNNING"}]}}),
+            HttpResult(200, "", {"data": {"status": "COMPLETED", "updateTime": "t4", "roots": [{"companyName": "企业A", "status": "COMPLETED"}]}}),
+        ]
+        empty_queue = HttpResult(200, "", {"data": {"total": 0, "items": []}})
+        responses = [item for state in states for item in (state, empty_queue)]
+        with patch.object(client, "_request", side_effect=responses):
+            results = client._poll_run("a.pdf", ["企业A"], "企业A", "run-1", 1)
+
+        self.assertEqual([item.status for item in results], ["success"])
+        self.assertGreater(current[0], 2)
+
+    def test_reconcile_pending_run_promotes_completed_root_to_success(self) -> None:
+        """
+        【方法功能】验证非阻塞二次对账可把已完成运行从 pending 更新为 success。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 14:30:00
+        """
+        client = SpiderClient(SpiderConfig("http://spider", retry_delays=()))
+        pending = SpiderTaskResult(
+            "a.pdf",
+            "企业A",
+            "企业A",
+            "pending_reconciliation",
+            "stalled",
+            run_id="run-1",
+            submitted_company_name="企业A",
+        )
+        completed = HttpResult(
+            200,
+            "",
+            {"data": {"status": "COMPLETED", "roots": [{"companyName": "企业A", "status": "COMPLETED"}]}},
+        )
+        empty_queue = HttpResult(200, "", {"data": {"total": 0, "items": []}})
+        with patch.object(client, "_request", side_effect=[completed, empty_queue]):
+            results = client.reconcile_result(pending)
+
+        self.assertEqual([item.status for item in results], ["success"])
+        self.assertEqual(results[0].run_id, "run-1")
+
+    def test_run_id_is_reported_before_cancel_stops_polling(self) -> None:
+        """
+        【方法功能】验证取得 runId 后即上报审计信息，取消信号不会丢失已创建的远程运行。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 16:10:00
+        """
+        submitted: list[dict[str, Any]] = []
+        cancelled = [False]
+
+        def record(payload: dict[str, Any]) -> None:
+            """
+            【函数功能】记录 runId 并模拟用户恰在提交成功后点击取消。
+            :param payload: dict[str, Any]，已提交爬虫运行信息
+            :return: None
+            :Author: gexinyan
+            :CreateTime: 2026-07-21 16:10:00
+            """
+            submitted.append(payload)
+            cancelled[0] = True
+
+        client = SpiderClient(
+            SpiderConfig("http://spider", retry_delays=()),
+            run_submitted_callback=record,
+            cancel_requested=lambda: cancelled[0],
+        )
+        response = HttpResult(200, "", {"data": {"runId": "run-1"}})
+        with patch.object(client, "_request", return_value=response):
+            results = client._submit_keyword("a.pdf", ["企业A"], "企业A")
+
+        self.assertEqual(results[0].status, "skipped")
+        self.assertEqual(submitted[0]["runId"], "run-1")
+        self.assertEqual(results[0].run_id, "run-1")
+
+    def test_cancel_run_calls_remote_cancel_and_reads_status(self) -> None:
+        """
+        【方法功能】验证远程取消使用 runId 取消接口并将已取消状态写入审计结果。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 16:10:00
+        """
+        client = SpiderClient(SpiderConfig("http://spider", retry_delays=()))
+        accepted = HttpResult(200, "", {"data": {"status": "CANCELLING"}})
+        cancelled = HttpResult(200, "", {"data": {"expansionStatus": "CANCELLED"}})
+        with patch.object(client, "_request", side_effect=[accepted, cancelled]) as request_mock:
+            result = client.cancel_run("run-1")
+
+        self.assertEqual(result["cancelStatus"], "cancelled")
+        self.assertEqual(request_mock.call_args_list[0].args[:2], ("http://spider/spider/crawl/runs/run-1/cancel", "POST"))
+        self.assertEqual(request_mock.call_args_list[1].args[:2], ("http://spider/spider/crawl/runs/run-1", "GET"))

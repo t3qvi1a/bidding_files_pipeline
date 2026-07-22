@@ -10,10 +10,13 @@ from __future__ import annotations
 import json
 import multiprocessing
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -26,6 +29,7 @@ from bidding_pipeline.web import (
     infer_log_progress,
     validate_local_input,
 )
+from bidding_pipeline.spider import SpiderConfig
 
 
 class WebSecurityTests(unittest.TestCase):
@@ -107,6 +111,21 @@ class WebJobStateTests(unittest.TestCase):
     :CreateTime: 2026-07-16 17:40:00
     """
 
+    def test_maintenance_marker_rejects_new_jobs(self) -> None:
+        """
+        【方法功能】验证部署维护标记存在时 Web 管理器拒绝创建新任务。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 14:30:00
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manager = JobManager(root)
+            (root / ".maintenance").write_text("deploying", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "维护模式"):
+                manager.create_job(root / "input", "all", (), False)
+            manager.executor.shutdown(wait=False, cancel_futures=True)
+
     def test_running_job_is_persisted_and_recovered_as_interrupted_after_restart(self) -> None:
         """
         【方法功能】验证运行任务写入磁盘后可恢复，服务重启时明确标记为已中断。
@@ -169,12 +188,15 @@ class WebJobStateTests(unittest.TestCase):
                     "failed": 1,
                     "skipped": 0,
                     "phase": "crawling",
+                    "root": {"total": 3, "success": 1, "failed": 0, "existing": 0, "pending": 1},
+                    "related": {"total": 1, "success": 0, "failed": 0, "existing": 0, "pending": 0},
                 },
             )
             response = job.to_dict()
             self.assertEqual(response["pdfProgress"], {"completed": 3, "total": 5, "percent": 60})
             self.assertEqual(response["spiderProgress"]["discovered"], 4)
             self.assertEqual(response["spiderProgress"]["failed"], 1)
+            self.assertEqual(response["spiderProgress"]["root"]["pending"], 1)
             manager.executor.shutdown(wait=False, cancel_futures=True)
 
             restored_manager = JobManager(root)
@@ -462,6 +484,68 @@ class WebJobStateTests(unittest.TestCase):
             self.assertNotEqual(payload["jobId"], source_job.job_id)
             self.assertEqual(payload["status"], "queued")
             self.assertEqual(payload["sourceMode"], "local")
+            manager.executor.shutdown(wait=False, cancel_futures=True)
+
+class RemoteCancellationTests(unittest.TestCase):
+    """
+    【类功能】验证 Web 任务取消时的 runId 持久化和远程爬虫终止审计。
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 16:10:00
+    """
+
+    def test_running_job_cancel_sets_shared_signal_and_persists_remote_state(self) -> None:
+        """
+        【方法功能】验证运行中任务收到取消请求后通知子进程停止继续提交企业。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 16:10:00
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = JobManager(Path(temp_dir))
+            job = JobState("running-job", Path(temp_dir) / "input", Path(temp_dir) / "output", status="running")
+            cancel_event = threading.Event()
+            manager.jobs[job.job_id] = job
+            manager.cancel_events[job.job_id] = cancel_event
+
+            cancelled = manager.cancel_job(job.job_id)
+
+            self.assertTrue(cancel_event.is_set())
+            self.assertEqual(cancelled.status, "cancelling")
+            self.assertEqual(cancelled.remote_cancellation["state"], "cancelling")
+            manager.executor.shutdown(wait=False, cancel_futures=True)
+
+    def test_remote_cancellation_updates_each_persisted_run(self) -> None:
+        """
+        【方法功能】验证取消操作逐个调用爬虫 runId 接口并记录远程终态。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 16:10:00
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manager = JobManager(root)
+            job = JobState("remote-job", root / "input", root / "output", status="cancelling")
+            manager.jobs[job.job_id] = job
+            manager._record_spider_run(
+                job,
+                {"runId": "run-1", "sourcePdf": "a.pdf", "companyNames": ["企业A"], "submittedAt": "now"},
+            )
+            config: Any = SimpleNamespace(spider=SpiderConfig("http://spider", retry_delays=()))
+            with patch("bidding_pipeline.web.SpiderClient") as client_class:
+                client_class.return_value.cancel_run.return_value = {
+                    "runId": "run-1",
+                    "cancelStatus": "cancelled",
+                    "expansionStatus": "CANCELLED",
+                    "message": "",
+                    "attempts": 1,
+                }
+                manager._cancel_remote_spider_runs(job, config)
+
+            self.assertEqual(client_class.return_value.cancel_run.call_args.args, ("run-1",))
+            self.assertEqual(job.spider_runs[0]["cancelStatus"], "cancelled")
+            self.assertEqual(job.remote_cancellation["state"], "completed")
+            persisted = json.loads((root / job.job_id / "job_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(persisted["spiderRuns"][0]["runId"], "run-1")
             manager.executor.shutdown(wait=False, cancel_futures=True)
 
 

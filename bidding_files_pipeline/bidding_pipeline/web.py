@@ -17,6 +17,7 @@ import signal
 import stat
 import subprocess
 import threading
+import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -30,7 +31,8 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .cli import build_argument_parser, build_pipeline_config
-from .runner import PipelineConfig, run_pipeline
+from .runner import PipelineConfig, reconcile_output, run_pipeline
+from .spider import SpiderClient
 
 
 CATEGORIES = (
@@ -54,6 +56,7 @@ CATEGORY_LABELS = {
 STAGE_PROGRESS = {1: 8, 2: 38, 3: 62, 4: 76, 5: 90}
 MAX_LOG_LINES = 2000
 STATE_FILENAME = "job_state.json"
+CANCEL_EVENT_DRAIN_SECONDS = 5.0
 ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 
@@ -158,7 +161,17 @@ def normalize_spider_progress(value: Any) -> dict[str, Any]:
         success = min(_nonnegative_int(group.get("success", 0)), total)
         failed = min(_nonnegative_int(group.get("failed", 0)), total - success)
         existing = min(_nonnegative_int(group.get("existing", 0)), total - success - failed)
-        return {"total": total, "success": success, "failed": failed, "existing": existing}
+        pending = min(
+            _nonnegative_int(group.get("pending", 0)),
+            total - success - failed - existing,
+        )
+        return {
+            "total": total,
+            "success": success,
+            "failed": failed,
+            "existing": existing,
+            "pending": pending,
+        }
     return {
         "discovered": discovered,
         "queued": queued,
@@ -218,6 +231,8 @@ class JobState:
     categories: tuple[str, ...] = field(default_factory=tuple)
     force_ocr: bool = False
     input_summary: str = ""
+    spider_runs: list[dict[str, Any]] = field(default_factory=list)
+    remote_cancellation: dict[str, Any] = field(default_factory=dict)
 
     def retry_unavailable_reason(self) -> str:
         """
@@ -267,6 +282,7 @@ class JobState:
             "categoryMode": self.category_mode,
             "categories": list(self.categories),
             "forceOcr": self.force_ocr,
+            "remoteCancellation": self.remote_cancellation_summary(),
         }
 
     def to_storage_dict(self) -> dict[str, Any]:
@@ -294,6 +310,8 @@ class JobState:
             "categories": list(self.categories),
             "forceOcr": self.force_ocr,
             "inputSummary": self.input_summary,
+            "spiderRuns": self.spider_runs,
+            "remoteCancellation": self.remote_cancellation,
         }
 
     @classmethod
@@ -328,10 +346,36 @@ class JobState:
             categories=tuple(str(value) for value in payload.get("categories", [])),
             force_ocr=bool(payload.get("forceOcr", False)),
             input_summary=str(payload.get("inputSummary", "")),
+            spider_runs=[dict(item) for item in payload.get("spiderRuns", []) if isinstance(item, dict)],
+            remote_cancellation=(
+                dict(payload.get("remoteCancellation", {}))
+                if isinstance(payload.get("remoteCancellation"), dict)
+                else {}
+            ),
         )
 
+    def remote_cancellation_summary(self) -> dict[str, Any]:
+        """汇总当前任务已知爬虫运行的远程取消状态。
 
-def execute_pipeline_process(config: PipelineConfig, event_queue: Any) -> None:
+        :return: dict[str, Any]，包含已提交、已取消、已终态、待确认和失败数量
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 16:10:00
+        Example: job.remote_cancellation_summary()
+        """
+        statuses = [str(item.get("cancelStatus", "")) for item in self.spider_runs]
+        return {
+            "state": str(self.remote_cancellation.get("state", "not_requested")),
+            "submittedCount": len(self.spider_runs),
+            "cancelledCount": statuses.count("cancelled"),
+            "terminalCount": statuses.count("terminal"),
+            "pendingCount": statuses.count("requested"),
+            "failedCount": statuses.count("failed"),
+            "requestedAt": str(self.remote_cancellation.get("requestedAt", "")),
+            "completedAt": str(self.remote_cancellation.get("completedAt", "")),
+        }
+
+
+def execute_pipeline_process(config: PipelineConfig, event_queue: Any, cancel_event: Any) -> None:
     """
     【函数功能】在独立进程组中执行 Pipeline，并把日志和完成状态发送给 Web 主进程。
     :param config: PipelineConfig，完整流水线配置
@@ -352,6 +396,10 @@ def execute_pipeline_process(config: PipelineConfig, event_queue: Any) -> None:
             structured_progress_callback=lambda event_type, payload: event_queue.put(
                 {"type": str(event_type), "progress": dict(payload)}
             ),
+            spider_run_submitted_callback=lambda payload: event_queue.put(
+                {"type": "spider_run_submitted", "run": dict(payload)}
+            ),
+            cancel_requested=cancel_event.is_set,
         )
         event_queue.put(
             {
@@ -391,8 +439,12 @@ class JobManager:
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bidding-pipeline")
         self.process_context = multiprocessing.get_context("spawn")
         self.processes: dict[str, Any] = {}
+        self.cancel_events: dict[str, Any] = {}
         self.cancel_requests: set[str] = set()
+        self.reconciliation_jobs: set[str] = set()
         self._load_jobs()
+        for restored_job in list(self.jobs.values()):
+            self._start_reconciliation(restored_job)
 
     def _state_path(self, job: JobState) -> Path:
         """
@@ -403,6 +455,15 @@ class JobManager:
         :CreateTime: 2026-07-16 17:40:00
         """
         return self.work_root / job.job_id / STATE_FILENAME
+
+    def maintenance_enabled(self) -> bool:
+        """
+        【方法功能】判断 Web 工作目录是否存在阻止新任务的部署维护标记。
+        :return: bool，存在 `.maintenance` 文件时返回 True
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 14:30:00
+        """
+        return (self.work_root / ".maintenance").is_file()
 
     def _read_logs(self, output_dir: Path) -> list[str]:
         """
@@ -549,6 +610,8 @@ class JobManager:
         :Author: gexinyan
         :CreateTime: 2026-07-16 16:20:00
         """
+        if self.maintenance_enabled():
+            raise ValueError("系统处于爬虫部署维护模式，暂不接受新任务")
         job_id = uuid.uuid4().hex
         output_dir = self.work_root / job_id / "output"
         job = JobState(
@@ -653,8 +716,16 @@ class JobManager:
                 job.stage = "任务已中止"
                 job.completed_at = datetime.now().astimezone().isoformat()
             else:
+                cancel_event = self.cancel_events.get(job_id)
+                if cancel_event is not None:
+                    cancel_event.set()
                 job.status = "cancelling"
-                job.stage = "正在中止任务"
+                job.stage = f"正在停止本地解析与 {len(job.spider_runs)} 个已提交爬虫运行"
+                job.remote_cancellation = {
+                    **job.remote_cancellation,
+                    "state": "cancelling",
+                    "requestedAt": datetime.now().astimezone().isoformat(),
+                }
             self._persist_job(job)
         self._add_log(job, "收到用户中止请求，正在停止当前解析进程。")
         return job
@@ -711,6 +782,99 @@ class JobManager:
                 return
             self._persist_job(job)
 
+    def _record_spider_run(self, job: JobState, value: Any) -> None:
+        """持久化子进程已提交到爬虫服务的 runId，供取消操作逐个终止。
+
+        :param job: JobState，当前 Web Pipeline 任务
+        :param value: Any，子进程上报的 runId、企业和来源 PDF 信息
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 16:10:00
+        Example: manager._record_spider_run(job, {"runId": "run-1"})
+        """
+        payload = value if isinstance(value, dict) else {}
+        run_id = str(payload.get("runId", "")).strip()
+        if not run_id:
+            return
+        with self.lock:
+            existing = next((item for item in job.spider_runs if item.get("runId") == run_id), None)
+            if existing is None:
+                job.spider_runs.append(
+                    {
+                        "runId": run_id,
+                        "sourcePdf": str(payload.get("sourcePdf", "")),
+                        "companyNames": [str(name) for name in payload.get("companyNames", []) if str(name)],
+                        "submittedAt": str(payload.get("submittedAt", "")),
+                        "cancelStatus": "",
+                        "expansionStatus": "",
+                        "cancelMessage": "",
+                    }
+                )
+                self._persist_job(job)
+        self._add_log(job, f"已登记爬虫运行：{run_id}")
+
+    def _cancel_remote_spider_runs(self, job: JobState, config: PipelineConfig) -> None:
+        """调用爬虫服务取消当前任务登记的全部未终态 runId 并持久化审计结果。
+
+        :param job: JobState，正在取消的 Web Pipeline 任务
+        :param config: PipelineConfig，用于读取当前爬虫服务地址与超时配置
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 16:10:00
+        Example: manager._cancel_remote_spider_runs(job, config)
+        """
+        client = SpiderClient(config.spider)
+        with self.lock:
+            run_ids = [
+                str(item.get("runId", ""))
+                for item in job.spider_runs
+                if item.get("runId") and item.get("cancelStatus") not in {"cancelled", "terminal"}
+            ]
+        for run_id in dict.fromkeys(run_ids):
+            result = client.cancel_run(run_id)
+            with self.lock:
+                record = next((item for item in job.spider_runs if item.get("runId") == run_id), None)
+                if record is None:
+                    continue
+                record["cancelStatus"] = str(result.get("cancelStatus", "failed"))
+                record["expansionStatus"] = str(result.get("expansionStatus", ""))
+                record["cancelMessage"] = str(result.get("message", ""))
+                record["cancelAttempts"] = _nonnegative_int(result.get("attempts", 0))
+                record["cancelledAt"] = datetime.now().astimezone().isoformat()
+                self._persist_job(job)
+            self._add_log(
+                job,
+                f"爬虫运行 {run_id} 取消结果：{result.get('cancelStatus', 'failed')}"
+                + (f"（{result.get('expansionStatus')}）" if result.get("expansionStatus") else ""),
+            )
+        with self.lock:
+            summary = job.remote_cancellation_summary()
+            job.remote_cancellation = {
+                **job.remote_cancellation,
+                "state": "completed" if not summary["pendingCount"] and not summary["failedCount"] else "pending",
+                "completedAt": datetime.now().astimezone().isoformat(),
+            }
+            self._persist_job(job)
+
+    def _drain_cancellation_events(self, job: JobState, event_queue: Any) -> None:
+        """在强制结束子进程前短暂接收在途提交返回的 runId 事件。
+
+        :param job: JobState，正在取消的 Web Pipeline 任务
+        :param event_queue: Any，Pipeline 子进程事件队列
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 16:10:00
+        Example: manager._drain_cancellation_events(job, event_queue)
+        """
+        deadline = time.monotonic() + CANCEL_EVENT_DRAIN_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                event = event_queue.get(timeout=min(0.25, max(0.01, deadline - time.monotonic())))
+            except queue.Empty:
+                continue
+            if str(event.get("type", "")) == "spider_run_submitted":
+                self._record_spider_run(job, event.get("run"))
+
     def _run_job(
         self,
         job: JobState,
@@ -738,6 +902,7 @@ class JobManager:
             self._persist_job(job)
         event_queue: Any = None
         process: Any = None
+        cancel_event: Any = None
         try:
             config = build_web_pipeline_config(
                 job.input_dir,
@@ -747,16 +912,21 @@ class JobManager:
                 force_ocr,
             )
             event_queue = self.process_context.Queue()
+            cancel_event = self.process_context.Event()
             process = self.process_context.Process(
                 target=execute_pipeline_process,
-                args=(config, event_queue),
+                args=(config, event_queue, cancel_event),
                 name=f"bidding-pipeline-{job.job_id[:8]}",
             )
             process.start()
             with self.lock:
                 self.processes[job.job_id] = process
+                self.cancel_events[job.job_id] = cancel_event
             while True:
                 if job.job_id in self.cancel_requests:
+                    cancel_event.set()
+                    self._drain_cancellation_events(job, event_queue)
+                    self._cancel_remote_spider_runs(job, config)
                     self._terminate_process(process)
                     self._mark_cancelled(job)
                     return
@@ -774,6 +944,9 @@ class JobManager:
                 event_type = str(event.get("type", ""))
                 if event_type == "log":
                     self._add_log(job, str(event.get("message", "")))
+                    continue
+                if event_type == "spider_run_submitted":
+                    self._record_spider_run(job, event.get("run"))
                     continue
                 if event_type in {"pdf_progress", "spider_progress"}:
                     self._update_structured_progress(job, event_type, event.get("progress"))
@@ -795,6 +968,7 @@ class JobManager:
         finally:
             with self.lock:
                 self.processes.pop(job.job_id, None)
+                self.cancel_events.pop(job.job_id, None)
                 self.cancel_requests.discard(job.job_id)
             if event_queue is not None:
                 event_queue.close()
@@ -850,7 +1024,12 @@ class JobManager:
         with self.lock:
             job.artifacts = self._collect_artifacts(job.output_dir)
             job.status = "cancelled"
-            job.stage = "任务已中止"
+            summary = job.remote_cancellation_summary()
+            job.stage = (
+                "任务已中止"
+                f"（远程爬虫：已取消 {summary['cancelledCount']}，已终态 {summary['terminalCount']}，"
+                f"待确认 {summary['pendingCount']}，失败 {summary['failedCount']}）"
+            )
             job.completed_at = datetime.now().astimezone().isoformat()
             self._persist_job(job)
         self._add_log(job, "当前 Pipeline 任务已由用户中止。")
@@ -891,6 +1070,81 @@ class JobManager:
             job.completed_at = datetime.now().astimezone().isoformat()
             self._persist_job(job)
         self._add_log(job, f"任务完成，流水线运行标识：{run_id}")
+        self._start_reconciliation(job)
+
+    def _start_reconciliation(self, job: JobState) -> None:
+        """
+        【方法功能】为含待对账爬虫结果的任务启动可跨 Web 重启恢复的后台复查线程。
+        :param job: JobState，可能包含临时爬虫结果的任务
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 14:30:00
+        """
+        crawl_path = job.output_dir / "crawl_results.json"
+        if not crawl_path.is_file():
+            return
+        try:
+            payload = json.loads(crawl_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if payload.get("crawlFinality") != "provisional" or int(payload.get("pendingCount", 0)) <= 0:
+            return
+        with self.lock:
+            if job.job_id in self.reconciliation_jobs:
+                return
+            self.reconciliation_jobs.add(job.job_id)
+        worker = threading.Thread(
+            target=self._reconcile_until_final,
+            args=(job.job_id,),
+            name=f"spider-reconcile-{job.job_id[:8]}",
+            daemon=True,
+        )
+        worker.start()
+
+    def _reconcile_until_final(self, job_id: str) -> None:
+        """
+        【方法功能】周期复查待对账企业，并在全部终态后刷新任务产物和页面状态。
+        :param job_id: str，Web 任务标识
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 14:30:00
+        """
+        try:
+            while True:
+                with self.lock:
+                    job = self.jobs.get(job_id)
+                if job is None or job.status in {"cancelled", "failed"}:
+                    return
+                interval = 30.0
+                manifest_path = job.output_dir / "run_manifest.json"
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    interval = max(
+                        1.0,
+                        float(
+                            manifest.get("config", {})
+                            .get("spider", {})
+                            .get("reconcileIntervalSeconds", interval)
+                        ),
+                    )
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    pass
+                try:
+                    audit = reconcile_output(job.output_dir)
+                    pending = int(audit.get("pendingCount", 0))
+                    with self.lock:
+                        job.artifacts = self._collect_artifacts(job.output_dir)
+                        job.stage = "爬虫结果待对账" if pending else "全部流程及爬虫对账完成"
+                        self._persist_job(job)
+                    if pending == 0:
+                        self._add_log(job, "企业爬虫二次对账完成，风险 JSON、Markdown 和 PDF 已刷新。")
+                        return
+                except Exception as exc:  # noqa: BLE001
+                    self._add_log(job, f"企业爬虫二次对账暂未完成：{exc}")
+                time.sleep(interval)
+        finally:
+            with self.lock:
+                self.reconciliation_jobs.discard(job_id)
 
 
 def configured_allowed_roots() -> tuple[Path, ...]:
@@ -1072,6 +1326,7 @@ def create_app(work_root: Path | None = None) -> FastAPI:
         return {
             "categories": [{"value": item, "label": CATEGORY_LABELS[item]} for item in CATEGORIES],
             "allowedInputRoots": [str(path) for path in allowed_roots],
+            "maintenanceMode": manager.maintenance_enabled(),
         }
 
     @app.post("/api/jobs", status_code=202)

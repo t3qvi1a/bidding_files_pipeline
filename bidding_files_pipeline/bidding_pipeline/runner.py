@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import csv
 import importlib
 import json
 import sys
@@ -19,7 +20,15 @@ from .database import DatabaseConfig, PersistenceSummary, ResultDatabaseWriter, 
 from .records import read_final_records
 from .reporting import ReportSummary, generate_report
 from .risk_analysis import RiskAnalysisSummary, analyze_risks
-from .spider import CrawlDispatcher, SpiderClient, SpiderConfig, SpiderTaskResult
+from .spider import (
+    PENDING_STATUSES,
+    CrawlDispatcher,
+    SpiderClient,
+    SpiderConfig,
+    SpiderTaskResult,
+    consolidate_spider_results,
+    spider_result_from_dict,
+)
 
 
 ProgressCallback = Callable[[str], None]
@@ -119,12 +128,22 @@ class RunOutcome:
     @property
     def failed_spider_count(self) -> int:
         """
-        【方法功能】统计失败、超时或无可见结果的企业爬虫任务数。
-        :return: int，非成功且非跳过的爬虫任务数
+        【方法功能】统计爬虫明确失败或无可见结果的企业数，不含待对账状态。
+        :return: int，明确失败的爬虫企业数
         :Author: gexinyan
         :CreateTime: 2026-07-16 10:00:00
         """
-        return sum(result.status not in {"success", "existing", "skipped"} for result in self.spider_results)
+        return sum(result.status in {"failed", "empty_result"} for result in self.spider_results)
+
+    @property
+    def pending_spider_count(self) -> int:
+        """
+        【方法功能】统计待提交、待对账、历史停滞及旧版超时企业数。
+        :return: int，尚未取得最终爬虫结论的企业数
+        :Author: gexinyan
+        :CreateTime: 2026-07-21 14:30:00
+        """
+        return sum(result.status in PENDING_STATUSES or result.status == "timeout" for result in self.spider_results)
 
     @property
     def failed_ocr_count(self) -> int:
@@ -146,7 +165,7 @@ class RunOutcome:
         """
         if self.failed_ocr_count > 0:
             return 1
-        if self.failed_spider_count > 0:
+        if self.failed_spider_count > 0 or self.pending_spider_count > 0:
             return 2
         return 0
 
@@ -191,6 +210,36 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def write_spider_name_review_queue(output_dir: Path, results: list[SpiderTaskResult]) -> Path | None:
+    """
+    【函数功能】把清洗后仍不合法的企业名称写入独立爬虫提交复核清单。
+    :param output_dir: Path，Pipeline 输出目录
+    :param results: list[SpiderTaskResult]，企业爬虫结果
+    :return: Path | None，存在待复核名称时返回 CSV 路径，否则返回 None
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 14:30:00
+    Example: write_spider_name_review_queue(Path("output"), [])
+    """
+    rows = [
+        {
+            "来源PDF": item.source_pdf,
+            "原始企业名称": item.original_company_name or item.company_name,
+            "提交企业名称": item.submitted_company_name,
+            "复核原因": item.pending_reason,
+        }
+        for item in results
+        if item.status == "pending_submission" and item.pending_reason == "invalid_company_name"
+    ]
+    if not rows:
+        return None
+    path = output_dir / "spider_company_review_queue.csv"
+    with path.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
 def pipeline_config_to_dict(config: PipelineConfig) -> dict[str, Any]:
     """
     【函数功能】生成不包含密码的 Pipeline 配置审计快照。
@@ -227,6 +276,10 @@ def pipeline_config_to_dict(config: PipelineConfig) -> dict[str, Any]:
             "timeoutSeconds": config.spider.timeout_seconds,
             "pollIntervalSeconds": config.spider.poll_interval_seconds,
             "maxPollSeconds": config.spider.max_poll_seconds,
+            "stallTimeoutSeconds": config.spider.stall_timeout_seconds,
+            "serviceOutageGraceSeconds": config.spider.service_outage_grace_seconds,
+            "reconcileIntervalSeconds": config.spider.reconcile_interval_seconds,
+            "retryableRunAttempts": config.spider.retryable_run_attempts,
             "retryDelays": list(config.spider.retry_delays),
             "fetchDeepInfo": config.spider.fetch_deep_info,
             "fetchBiddingDetail": config.spider.fetch_bidding_detail,
@@ -249,7 +302,8 @@ def build_spider_statistics(spider_results: list[SpiderTaskResult]) -> dict[str,
     :CreateTime: 2026-07-21 09:30:00
     Example: build_spider_statistics([])
     """
-    failure_statuses = {"failed", "timeout", "empty_result"}
+    failure_statuses = {"failed", "empty_result"}
+    pending_statuses = {*PENDING_STATUSES, "timeout"}
 
     def summarize(items: list[SpiderTaskResult]) -> dict[str, int]:
         """
@@ -264,11 +318,37 @@ def build_spider_statistics(spider_results: list[SpiderTaskResult]) -> dict[str,
             "success": sum(item.status == "success" for item in items),
             "failed": sum(item.status in failure_statuses for item in items),
             "existing": sum(item.status == "existing" for item in items),
+            "pending": sum(item.status in pending_statuses for item in items),
         }
 
     roots = [item for item in spider_results if item.company_type == "root"]
     related = [item for item in spider_results if item.company_type == "related"]
     return {"root": summarize(roots), "related": summarize(related), "overall": summarize(spider_results)}
+
+
+def spider_result_signature(spider_results: list[SpiderTaskResult]) -> str:
+    """
+    【函数功能】生成忽略轮询次数等审计噪声的企业终态签名，用于判断报告是否需要刷新。
+    :param spider_results: list[SpiderTaskResult]，企业爬虫结果
+    :return: str，稳定排序后的 JSON 签名
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 14:30:00
+    Example: spider_result_signature([])
+    """
+    rows = sorted(
+        (
+            item.company_type,
+            item.company_name,
+            item.status,
+            item.run_id,
+            item.raw_status,
+            item.message,
+            item.has_data,
+            item.expansion_status,
+        )
+        for item in spider_results
+    )
+    return json.dumps(rows, ensure_ascii=False)
 
 
 def build_crawl_audit(run_id: str, spider_results: list[SpiderTaskResult]) -> dict[str, Any]:
@@ -295,13 +375,184 @@ def build_crawl_audit(run_id: str, spider_results: list[SpiderTaskResult]) -> di
                 service_run_ids.add(audit_run_id)
                 if audit_expansion_status:
                     expansion_statuses[audit_run_id] = audit_expansion_status
+    statistics = build_spider_statistics(spider_results)
+    pending_count = statistics["overall"]["pending"]
     return {
+        "schemaVersion": "2.0",
         "runId": run_id,
+        "crawlFinality": "provisional" if pending_count else "final",
+        "pendingCount": pending_count,
         "serviceRunIds": sorted(service_run_ids),
         "expansionStatuses": expansion_statuses,
-        "statistics": build_spider_statistics(spider_results),
+        "statistics": statistics,
         "results": [item.to_dict() for item in spider_results],
     }
+
+
+def _database_config_from_manifest(manifest: dict[str, Any]) -> DatabaseConfig:
+    """
+    【函数功能】使用运行清单和当前私有环境变量恢复二次对账数据库配置。
+    :param manifest: dict[str, Any]，run_manifest.json 对象
+    :return: DatabaseConfig，可用于重新分析风险的数据库配置
+    :raises ValueError: 清单缺字段或当前环境缺少数据库密码时触发
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 14:30:00
+    Example: _database_config_from_manifest({"config": {"database": {}}})
+    """
+    import os
+
+    value = manifest.get("config", {}).get("database", {})
+    password = os.getenv("GENERAL_DB_PASSWORD", "")
+    if not isinstance(value, dict) or not password:
+        raise ValueError("二次对账缺少数据库清单或 GENERAL_DB_PASSWORD")
+    return DatabaseConfig(
+        host=str(value.get("host", "")),
+        port=int(value.get("port", 0)),
+        database=str(value.get("database", "")),
+        username=str(value.get("username", "")),
+        password=password,
+        schema=str(value.get("schema", "dwd")),
+        table=str(value.get("table", "dwd_bid_extraction_results")),
+    )
+
+
+def _spider_config_from_manifest(manifest: dict[str, Any]) -> SpiderConfig:
+    """
+    【函数功能】从运行清单恢复一次非阻塞对账所需的爬虫配置。
+    :param manifest: dict[str, Any]，run_manifest.json 对象
+    :return: SpiderConfig，二次对账客户端配置
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 14:30:00
+    Example: _spider_config_from_manifest({"config": {"spider": {"baseUrl": "http://spider"}}})
+    """
+    value = manifest.get("config", {}).get("spider", {})
+    if not isinstance(value, dict):
+        value = {}
+    return SpiderConfig(
+        base_url=str(value.get("baseUrl", "http://127.0.0.1:9081")),
+        submit_mode=str(value.get("submitMode", "single")),
+        timeout_seconds=int(value.get("timeoutSeconds", 20)),
+        poll_interval_seconds=float(value.get("pollIntervalSeconds", 5.0)),
+        max_poll_seconds=0.0,
+        stall_timeout_seconds=0.0,
+        service_outage_grace_seconds=0.0,
+        reconcile_interval_seconds=float(value.get("reconcileIntervalSeconds", 30.0)),
+        retryable_run_attempts=int(value.get("retryableRunAttempts", 2)),
+        retry_delays=(),
+        fetch_deep_info=bool(value.get("fetchDeepInfo", False)),
+        fetch_bidding_detail=bool(value.get("fetchBiddingDetail", False)),
+        relation_expansion_depth=int(value.get("relationExpansionDepth", 1)),
+    )
+
+
+def _annotate_risk_finality(path: Path, crawl_audit: dict[str, Any]) -> None:
+    """
+    【函数功能】在风险 JSON 中写入爬虫数据最终性和待对账覆盖提示。
+    :param path: Path，risk_records.json 路径
+    :param crawl_audit: dict[str, Any]，最新爬虫审计对象
+    :return: None
+    :raises OSError: 风险文件读写失败时触发
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 14:30:00
+    Example: _annotate_risk_finality(Path("risk_records.json"), {"pendingCount": 1})
+    """
+    if not path.is_file():
+        return
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    summary = payload.setdefault("summary", {})
+    summary["crawlFinality"] = crawl_audit["crawlFinality"]
+    summary["pendingSpiderCount"] = crawl_audit["pendingCount"]
+    summary["crawlCoverageNotice"] = (
+        f"当前结果基于已完成爬虫数据，仍有 {crawl_audit['pendingCount']} 家企业待对账。"
+        if crawl_audit["pendingCount"]
+        else "爬虫企业均已取得最终状态。"
+    )
+    write_json(path, payload)
+
+
+def reconcile_output(output_dir: Path) -> dict[str, Any]:
+    """
+    【函数功能】对已有 Pipeline 输出执行一次非阻塞爬虫复查并刷新风险报告。
+    :param output_dir: Path，包含 crawl_results.json 和 run_manifest.json 的输出目录
+    :return: dict[str, Any]，刷新后的爬虫审计对象
+    :raises FileNotFoundError: 必要运行产物缺失时触发
+    :Author: gexinyan
+    :CreateTime: 2026-07-21 14:30:00
+    Example: reconcile_output(Path("output"))
+    """
+    resolved = output_dir.resolve()
+    crawl_path = resolved / "crawl_results.json"
+    manifest_path = resolved / "run_manifest.json"
+    if not crawl_path.is_file() or not manifest_path.is_file():
+        raise FileNotFoundError("二次对账需要 crawl_results.json 和 run_manifest.json")
+    crawl_payload = json.loads(crawl_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    results = [spider_result_from_dict(item) for item in crawl_payload.get("results", []) if isinstance(item, dict)]
+    pending = [item for item in results if item.status in PENDING_STATUSES or item.status == "timeout"]
+    if pending:
+        client = SpiderClient(_spider_config_from_manifest(manifest))
+        seeds: list[SpiderTaskResult] = []
+        seen: set[str] = set()
+        pending_run_ids = {item.run_id for item in pending if item.run_id}
+        for run_id_value in pending_run_ids:
+            root = next(
+                (item for item in results if item.run_id == run_id_value and item.company_type == "root"),
+                None,
+            )
+            if root is not None:
+                seeds.append(replace(root, status="pending_reconciliation"))
+                seen.add(run_id_value)
+        for item in pending:
+            key = item.run_id or f"submission:{item.company_name.casefold()}"
+            if key in seen:
+                continue
+            seen.add(key)
+            seeds.append(item)
+        refreshed = [result for seed in seeds for result in client.reconcile_result(seed)]
+        results = consolidate_spider_results((*results, *refreshed))
+    run_id = str(crawl_payload.get("runId") or manifest.get("runId") or "")
+    audit = build_crawl_audit(run_id, results)
+    current_signature = spider_result_signature(results)
+    write_json(crawl_path, audit)
+    manifest["spiderStatistics"] = audit["statistics"]
+    manifest["spiderRunIds"] = audit["serviceRunIds"]
+    manifest["spiderExpansionStatuses"] = audit["expansionStatuses"]
+    manifest["crawlFinality"] = audit["crawlFinality"]
+    manifest["pendingSpiderCount"] = audit["pendingCount"]
+    config_value = manifest.get("config", {})
+    report_refresh_required = manifest.get("reportSpiderSignature") != current_signature
+    if report_refresh_required and run_id and not bool(config_value.get("skipRiskAnalysis", False)):
+        database = _database_config_from_manifest(manifest)
+        risk = analyze_risks(
+            database,
+            str(config_value.get("spiderResultDatabase", database.database)),
+            run_id,
+            resolved / "risk_records.json",
+        )
+        _annotate_risk_finality(risk.json_path, audit)
+        report = generate_report(
+            risk.json_path,
+            resolved / "risk_report.md",
+            resolved / "risk_report.pdf",
+            Path(str(config_value.get("reportTemplate") or default_report_template())),
+            Path(str(config_value.get("reportRenderer") or default_report_renderer())),
+        )
+        manifest["riskAnalysis"] = {
+            "riskCount": risk.risk_count,
+            "projectCount": risk.project_count,
+            "companyCount": risk.company_count,
+            "unmatchedCompanyCount": risk.unmatched_company_count,
+            "jsonPath": str(risk.json_path),
+        }
+        manifest["report"] = {
+            "riskCount": report.risk_count,
+            "markdownPath": str(report.markdown_path),
+            "pdfPath": str(report.pdf_path),
+        }
+        manifest["reportSpiderSignature"] = current_signature
+        manifest["reportCrawlFinality"] = audit["crawlFinality"]
+    write_json(manifest_path, manifest)
+    return audit
 
 
 def build_manifest(
@@ -348,6 +599,10 @@ def build_manifest(
         "spiderStatistics": build_spider_statistics(spider_results),
         "spiderRunIds": crawl_audit["serviceRunIds"],
         "spiderExpansionStatuses": crawl_audit["expansionStatuses"],
+        "crawlFinality": crawl_audit["crawlFinality"],
+        "pendingSpiderCount": crawl_audit["pendingCount"],
+        "reportSpiderSignature": spider_result_signature(spider_results) if report else "",
+        "reportCrawlFinality": crawl_audit["crawlFinality"] if report else "",
         "spiderResultCount": len(spider_results),
         "persistence": (
             {
@@ -386,6 +641,8 @@ def run_pipeline(
     config: PipelineConfig,
     progress_callback: ProgressCallback = print,
     structured_progress_callback: StructuredProgressCallback | None = None,
+    spider_run_submitted_callback: Callable[[dict[str, Any]], None] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> RunOutcome:
     """
     【函数功能】执行 OCR 与企业爬虫并行阶段，再顺序完成入库、风险分析和报告生成。
@@ -426,6 +683,8 @@ def run_pipeline(
     dispatcher = _build_dispatcher(
         config,
         progress_callback=lambda snapshot: emit_structured_progress("spider_progress", snapshot),
+        spider_run_submitted_callback=spider_run_submitted_callback,
+        cancel_requested=cancel_requested,
     )
     try:
         progress_callback("[阶段 1/5] 开始解析 PDF 文件，企业爬虫将在每份 PDF 解析完成后立即启动。")
@@ -462,7 +721,9 @@ def run_pipeline(
         ocr_summary = summary.to_dict()
         progress_callback("[阶段 2/5] PDF 解析完成，正在等待企业爬虫任务收尾。")
         spider_results = dispatcher.wait()
-        write_json(output_dir / "crawl_results.json", build_crawl_audit(run_id, spider_results))
+        crawl_audit = build_crawl_audit(run_id, spider_results)
+        write_json(output_dir / "crawl_results.json", crawl_audit)
+        write_spider_name_review_queue(output_dir, spider_results)
         final_records = read_final_records(output_dir / "final.csv")
         final_record_count = len(final_records)
         if config.dry_run:
@@ -484,6 +745,7 @@ def run_pipeline(
                     run_id,
                     output_dir / "risk_records.json",
                 )
+                _annotate_risk_finality(risk_analysis.json_path, crawl_audit)
                 progress_callback(
                     f"风险分析完成：覆盖 {risk_analysis.project_count} 个标段，发现 {risk_analysis.risk_count} 组风险。"
                 )
@@ -528,6 +790,7 @@ def run_pipeline(
         try:
             spider_results = dispatcher.wait()
             write_json(output_dir / "crawl_results.json", build_crawl_audit(run_id, spider_results))
+            write_spider_name_review_queue(output_dir, spider_results)
             write_json(
                 output_dir / "run_manifest.json",
                 build_manifest(
@@ -577,6 +840,8 @@ def default_report_template() -> Path:
 def _build_dispatcher(
     config: PipelineConfig,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    spider_run_submitted_callback: Callable[[dict[str, Any]], None] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> CrawlDispatcher:
     """
     【函数功能】根据 dry-run、跳过开关和数据库配置创建单线程爬虫调度器。
@@ -589,11 +854,22 @@ def _build_dispatcher(
     """
     enabled = not config.skip_spider and not config.dry_run
     if not enabled:
-        return CrawlDispatcher(None, enabled=False, progress_callback=progress_callback)
+        return CrawlDispatcher(
+            None,
+            enabled=False,
+            progress_callback=progress_callback,
+            cancel_requested=cancel_requested,
+        )
     verifier_config = replace(config.database, database=config.spider_result_database, table="spider_data_company")
     verifier = SpiderDataVerifier(verifier_config).verify
     return CrawlDispatcher(
-        SpiderClient(config.spider, verifier=verifier),
+        SpiderClient(
+            config.spider,
+            verifier=verifier,
+            run_submitted_callback=spider_run_submitted_callback,
+            cancel_requested=cancel_requested,
+        ),
         enabled=True,
         progress_callback=progress_callback,
+        cancel_requested=cancel_requested,
     )

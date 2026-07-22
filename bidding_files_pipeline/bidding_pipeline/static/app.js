@@ -342,8 +342,8 @@ function renderSpiderProgress(progress) {
   const rootTotal = Math.max(0, Number(root.total) || 0);
   const relatedTotal = Math.max(0, Number(related.total) || 0);
   const discovered = rootTotal + relatedTotal || Math.max(0, Number(current.discovered) || 0);
-  const rootFinished = Math.min(rootTotal, (Number(root.success) || 0) + (Number(root.failed) || 0) + (Number(root.existing) || 0));
-  const relatedFinished = Math.min(relatedTotal, (Number(related.success) || 0) + (Number(related.failed) || 0) + (Number(related.existing) || 0));
+  const rootFinished = Math.min(rootTotal, (Number(root.success) || 0) + (Number(root.failed) || 0) + (Number(root.existing) || 0) + (Number(root.pending) || 0));
+  const relatedFinished = Math.min(relatedTotal, (Number(related.success) || 0) + (Number(related.failed) || 0) + (Number(related.existing) || 0) + (Number(related.pending) || 0));
   const completed = rootTotal + relatedTotal > 0 ? rootFinished + relatedFinished : Math.min(Math.max(0, Number(current.completed) || 0), discovered);
   const running = Math.max(0, Number(current.running) || 0);
   const failed = Math.max(0, Number(current.failed) || 0);
@@ -351,7 +351,8 @@ function renderSpiderProgress(progress) {
   const rootPercent = rootTotal > 0 ? Math.floor(rootFinished * 100 / rootTotal) : 0;
   const relatedPercent = relatedTotal > 0 ? Math.floor(relatedFinished * 100 / relatedTotal) : 0;
   const phase = current.phase || "waiting_for_companies";
-  let detail = `已完成 ${completed} / 已发现 ${discovered} 家企业 · 处理中 ${running} · 失败 ${failed}`;
+  const pending = Math.max(0, (Number(root.pending) || 0) + (Number(related.pending) || 0));
+  let detail = `已处理 ${completed} / 已发现 ${discovered} 家企业 · 处理中 ${running} · 明确失败 ${failed} · 待对账 ${pending}`;
   if (discovered === 0 && phase === "waiting_for_companies") {
     detail = "等待 PDF 解析结果，尚未发现企业";
   } else if (discovered === 0 && phase === "completed") {
@@ -362,10 +363,10 @@ function renderSpiderProgress(progress) {
   byId("spider-progress-detail").textContent = detail;
   byId("root-progress-value").textContent = `${rootPercent}%`;
   byId("root-progress-bar").style.width = `${rootPercent}%`;
-  byId("root-progress-detail").textContent = `根企业：${rootTotal} 家｜已完成：${Number(root.success) || 0}｜失败：${Number(root.failed) || 0}｜数据已存在：${Number(root.existing) || 0}`;
+  byId("root-progress-detail").textContent = `根企业：${rootTotal} 家｜成功：${Number(root.success) || 0}｜明确失败：${Number(root.failed) || 0}｜待对账：${Number(root.pending) || 0}｜数据已存在：${Number(root.existing) || 0}`;
   byId("related-progress-value").textContent = `${relatedPercent}%`;
   byId("related-progress-bar").style.width = `${relatedPercent}%`;
-  byId("related-progress-detail").textContent = `已发现关联企业：${relatedTotal} 家｜已完成：${Number(related.success) || 0}｜失败：${Number(related.failed) || 0}｜数据已存在：${Number(related.existing) || 0}`;
+  byId("related-progress-detail").textContent = `已发现关联企业：${relatedTotal} 家｜成功：${Number(related.success) || 0}｜明确失败：${Number(related.failed) || 0}｜待对账：${Number(related.pending) || 0}｜数据已存在：${Number(related.existing) || 0}`;
   byId("expansion-status-detail").textContent = `关系扩展状态：${current.expansionStatus || "WAITING"}`;
 }
 
