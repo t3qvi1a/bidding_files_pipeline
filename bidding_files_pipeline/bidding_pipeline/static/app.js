@@ -24,6 +24,50 @@ function byId(id) {
   return element;
 }
 
+
+/**
+ * 【函数功能】将页面展示中的技术术语转换为业务人员易理解的中文表述。
+ * @param {string} value - 待转换的原始文本。
+ * @returns {string} 转换后的展示文本。
+ * @author gexinyan
+ * @CreateTime 2026-07-30 09:15:00
+ */
+function humanizeDisplayText(value) {
+  const replacements = [
+    ["企业信息爬取", "工商信息获取"],
+    ["企业爬虫", "工商信息获取"],
+    ["爬虫", "工商信息获取"],
+    ["Pipeline", "完整流程"],
+    ["pipeline", "完整流程"],
+    ["include/exclude", "仅处理或排除"],
+    ["include", "仅处理"],
+    ["exclude", "排除"],
+    ["OCR", "文字识别"],
+  ];
+  return replacements.reduce(
+    (text, [source, target]) => text.split(source).join(target),
+    String(value || ""),
+  );
+}
+
+/**
+ * 【函数功能】将关系扩展的内部状态代码转换为中文状态。
+ * @param {string} status - 接口返回的关系扩展状态代码。
+ * @returns {string} 中文状态文本。
+ * @author gexinyan
+ * @CreateTime 2026-07-30 09:15:00
+ */
+function formatExpansionStatus(status) {
+  const labels = {
+    WAITING: "等待开始",
+    RUNNING: "正在获取",
+    COMPLETED: "已完成",
+    FAILED: "失败",
+    CANCELLED: "已中止",
+  };
+  return labels[status] || "等待开始";
+}
+
 /**
  * 【函数功能】加载服务器允许目录与可选文件类别。
  * @returns {Promise<void>} 配置加载完成后返回。
@@ -94,13 +138,13 @@ async function submitJob(event) {
   const categoryMode = byId("category-mode").value;
   const selectedCategories = [...document.querySelectorAll('input[name="category"]:checked')].map((item) => item.value);
   if (sourceMode === "upload" && !byId("archive").files.length) {
-    showError("请选择需要解析的 ZIP 压缩包。"); return;
+    showError("请选择需要解析的压缩文件。"); return;
   }
   if (sourceMode === "local" && !byId("local-path").value.trim()) {
     showError("请输入服务器本地目录。"); return;
   }
   if (categoryMode !== "all" && !selectedCategories.length) {
-    showError("include/exclude 模式至少选择一个文件类别。"); return;
+    showError("仅处理或排除模式至少选择一个文件类别。"); return;
   }
   const data = new FormData();
   if (sourceMode === "upload") data.append("archive", byId("archive").files[0]);
@@ -264,7 +308,7 @@ async function retryCurrentJob() {
  */
 function renderJob(job) {
   currentJobStatus = job.status;
-  byId("stage-title").textContent = job.stage;
+  byId("stage-title").textContent = humanizeDisplayText(job.stage);
   byId("progress-value").textContent = `${job.progress}%`;
   byId("progress-bar").style.width = `${job.progress}%`;
   renderPdfProgress(job.pdfProgress);
@@ -301,7 +345,7 @@ function renderJob(job) {
   });
   const log = byId("log-output");
   const shouldStick = log.scrollHeight - log.scrollTop - log.clientHeight < 50;
-  log.textContent = job.logs.join("\n") || "任务正在初始化…";
+  log.textContent = (job.logs || []).map(humanizeDisplayText).join("\n") || "任务正在初始化…";
   if (shouldStick) log.scrollTop = log.scrollHeight;
   updateArtifact("download-csv", "csv", job.artifacts);
   updateArtifact("download-report", "risk_report", job.artifacts);
@@ -325,7 +369,7 @@ function renderPdfProgress(progress) {
   byId("pdf-progress-value").textContent = `${percent}%`;
   byId("pdf-progress-bar").style.width = `${percent}%`;
   byId("pdf-progress-detail").textContent = total > 0 ?
-    `已完成 ${completed} / ${total} 个 PDF` : "等待开始解析";
+    `已完成 ${completed} / ${total} 份文件` : "等待开始解析";
 }
 
 /**
@@ -352,22 +396,22 @@ function renderSpiderProgress(progress) {
   const relatedPercent = relatedTotal > 0 ? Math.floor(relatedFinished * 100 / relatedTotal) : 0;
   const phase = current.phase || "waiting_for_companies";
   const pending = Math.max(0, (Number(root.pending) || 0) + (Number(related.pending) || 0));
-  let detail = `已处理 ${completed} / 已发现 ${discovered} 家企业 · 处理中 ${running} · 明确失败 ${failed} · 待对账 ${pending}`;
+  let detail = `已完成工商信息获取 ${completed} / 已发现企业 ${discovered} 家 · 正在处理 ${running} 家 · 失败 ${failed} 家 · 待核验 ${pending} 家`;
   if (discovered === 0 && phase === "waiting_for_companies") {
-    detail = "等待 PDF 解析结果，尚未发现企业";
+    detail = "等待文件解析完成，尚未发现企业";
   } else if (discovered === 0 && phase === "completed") {
-    detail = "未发现需要爬取的企业";
+    detail = "未发现需要获取工商信息的企业";
   }
   byId("spider-progress-value").textContent = `${percent}%`;
   byId("spider-progress-bar").style.width = `${percent}%`;
   byId("spider-progress-detail").textContent = detail;
   byId("root-progress-value").textContent = `${rootPercent}%`;
   byId("root-progress-bar").style.width = `${rootPercent}%`;
-  byId("root-progress-detail").textContent = `根企业：${rootTotal} 家｜成功：${Number(root.success) || 0}｜明确失败：${Number(root.failed) || 0}｜待对账：${Number(root.pending) || 0}｜数据已存在：${Number(root.existing) || 0}`;
+  byId("root-progress-detail").textContent = `参与投标企业：${rootTotal} 家｜已完成：${Number(root.success) || 0}｜失败：${Number(root.failed) || 0}｜待核验：${Number(root.pending) || 0}｜已有数据：${Number(root.existing) || 0}`;
   byId("related-progress-value").textContent = `${relatedPercent}%`;
   byId("related-progress-bar").style.width = `${relatedPercent}%`;
-  byId("related-progress-detail").textContent = `已发现关联企业：${relatedTotal} 家｜成功：${Number(related.success) || 0}｜明确失败：${Number(related.failed) || 0}｜待对账：${Number(related.pending) || 0}｜数据已存在：${Number(related.existing) || 0}`;
-  byId("expansion-status-detail").textContent = `关系扩展状态：${current.expansionStatus || "WAITING"}`;
+  byId("related-progress-detail").textContent = `已发现相关企业：${relatedTotal} 家｜已完成：${Number(related.success) || 0}｜失败：${Number(related.failed) || 0}｜待核验：${Number(related.pending) || 0}｜已有数据：${Number(related.existing) || 0}`;
+  byId("expansion-status-detail").textContent = `关系扩展状态：${formatExpansionStatus(current.expansionStatus)}`;
 }
 
 /**

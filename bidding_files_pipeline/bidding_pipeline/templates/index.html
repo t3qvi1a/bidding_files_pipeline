@@ -10,7 +10,7 @@
   <header class="topbar">
     <div class="brand-mark" aria-hidden="true">JW</div>
     <div>
-      <p class="eyebrow">BIDDING DOCUMENT INTELLIGENCE</p>
+      <p class="eyebrow">招投标文件智能分析</p>
       <h1>投标文件解析与风险分析平台</h1>
     </div>
     <span class="environment">内网服务</span>
@@ -21,7 +21,7 @@
       <div>
         <span class="section-index">01 / 任务配置</span>
         <h2>从文件解析到风险报告，一次完成</h2>
-        <p>依次执行 PDF 解析、企业信息爬取、结果入库、openGauss 关联风险分析和报告生成。</p>
+        <p>依次完成文件解析、工商信息获取、结果入库、关联风险分析和报告生成。</p>
       </div>
       <div class="hero-stat">
         <strong>5</strong>
@@ -33,7 +33,7 @@
       <div class="form-section">
         <div class="section-heading">
           <h3>文件来源</h3>
-          <p>上传 ZIP 压缩包，或使用服务器允许目录中的现有文件。</p>
+          <p>上传压缩文件，或使用服务器允许目录中的现有文件。</p>
         </div>
         <div class="source-switch" role="radiogroup" aria-label="文件来源">
           <label><input type="radio" name="source_mode" value="upload" checked> 上传压缩包</label>
@@ -41,9 +41,9 @@
         </div>
         <div id="upload-source" class="source-panel">
           <label class="upload-box" for="archive">
-            <span class="upload-icon">ZIP</span>
+            <span class="upload-icon">压缩包</span>
             <strong id="upload-label">选择投标文件压缩包</strong>
-            <small>仅支持 .zip，压缩包内应包含 PDF 文件</small>
+            <small>仅支持 .zip 格式的压缩文件，压缩包内应包含待解析文档</small>
           </label>
           <input id="archive" name="archive" type="file" accept=".zip,application/zip" hidden>
         </div>
@@ -58,22 +58,22 @@
         <div>
           <div class="section-heading">
             <h3>文件类别</h3>
-            <p>配置方式与命令行 <code>--include</code> / <code>--exclude</code> 一致。</p>
+            <p>选择需要处理或排除的文件类别。</p>
           </div>
           <select id="category-mode" name="category_mode">
             <option value="all">处理全部类别</option>
-            <option value="include">仅处理所选类别（include）</option>
-            <option value="exclude">排除所选类别（exclude）</option>
+            <option value="include">仅处理所选类别</option>
+            <option value="exclude">排除所选类别</option>
           </select>
           <div id="category-list" class="category-list" aria-label="文件类别"></div>
         </div>
         <div class="run-options">
           <div class="section-heading">
             <h3>运行选项</h3>
-            <p>默认复用 OCR 缓存，可按需强制重新识别。</p>
+            <p>默认复用已有识别结果，可按需重新进行文字识别。</p>
           </div>
           <label class="toggle-row">
-            <span><strong>强制重新 OCR</strong><small>忽略已有缓存并重新解析</small></span>
+            <span><strong>强制重新文字识别</strong><small>忽略已有解析结果并重新识别</small></span>
             <input id="force-ocr" name="force_ocr" type="checkbox">
           </label>
         </div>
@@ -81,7 +81,7 @@
 
       <div id="form-error" class="alert hidden" role="alert"></div>
       <button id="start-button" class="primary-button" type="submit">
-        <span>开始执行完整 Pipeline</span><span aria-hidden="true">→</span>
+        <span>开始执行完整流程</span><span aria-hidden="true">→</span>
       </button>
     </form>
 
@@ -103,31 +103,31 @@
         <div class="progress-meta"><span>整体进度</span><strong id="progress-value">0%</strong></div>
         <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
         <div class="parallel-progress-grid">
-          <section class="parallel-progress-item" aria-label="PDF 文件解析进度">
-            <div class="progress-meta"><span>PDF 文件解析</span><strong id="pdf-progress-value">0%</strong></div>
+          <section class="parallel-progress-item" aria-label="文件解析进度">
+            <div class="progress-meta"><span>文件解析</span><strong id="pdf-progress-value">0%</strong></div>
             <div class="progress-track"><div id="pdf-progress-bar" class="progress-bar"></div></div>
             <p id="pdf-progress-detail" class="progress-detail">等待开始解析</p>
           </section>
-          <section class="parallel-progress-item" aria-label="企业信息爬取进度">
-            <div class="progress-meta"><span>企业整体进度</span><strong id="spider-progress-value">0%</strong></div>
+          <section class="parallel-progress-item" aria-label="工商信息获取进度">
+            <div class="progress-meta"><span>工商信息获取总体进度</span><strong id="spider-progress-value">0%</strong></div>
             <div class="progress-track"><div id="spider-progress-bar" class="progress-bar spider-progress-bar"></div></div>
-            <p id="spider-progress-detail" class="progress-detail">等待 PDF 解析结果</p>
+            <p id="spider-progress-detail" class="progress-detail">等待文件解析结果</p>
             <div class="enterprise-progress-group">
-              <div class="progress-meta"><span>根企业进度</span><strong id="root-progress-value">0%</strong></div>
+              <div class="progress-meta"><span>参与投标企业信息获取进度</span><strong id="root-progress-value">0%</strong></div>
               <div class="progress-track"><div id="root-progress-bar" class="progress-bar root-progress-bar"></div></div>
             </div>
-            <p id="root-progress-detail" class="progress-detail">根企业：0 家｜已完成：0｜失败：0｜数据已存在：0</p>
+            <p id="root-progress-detail" class="progress-detail">参与投标企业：0 家｜已完成：0｜失败：0｜已有数据：0</p>
             <div class="enterprise-progress-group">
-              <div class="progress-meta"><span>关联企业进度</span><strong id="related-progress-value">0%</strong></div>
+              <div class="progress-meta"><span>相关企业信息获取进度</span><strong id="related-progress-value">0%</strong></div>
               <div class="progress-track"><div id="related-progress-bar" class="progress-bar related-progress-bar"></div></div>
             </div>
-            <p id="related-progress-detail" class="progress-detail">已发现关联企业：0 家｜已完成：0｜失败：0｜数据已存在：0</p>
+            <p id="related-progress-detail" class="progress-detail">已发现相关企业：0 家｜已完成：0｜失败：0｜已有数据：0</p>
             <p id="expansion-status-detail" class="progress-detail">关系扩展状态：WAITING</p>
           </section>
         </div>
         <ol class="stage-list">
-          <li data-stage="1"><span>1</span>PDF 解析</li>
-          <li data-stage="2"><span>2</span>企业爬虫</li>
+          <li data-stage="1"><span>1</span>文件解析</li>
+          <li data-stage="2"><span>2</span>工商信息获取</li>
           <li data-stage="3"><span>3</span>结果入库</li>
           <li data-stage="4"><span>4</span>风险分析</li>
           <li data-stage="5"><span>5</span>报告生成</li>
@@ -135,10 +135,10 @@
       </div>
 
       <div class="artifact-grid">
-        <a id="download-csv" class="artifact-button disabled" href="#" aria-disabled="true"><span>CSV</span><strong>下载解析结果</strong></a>
-        <a id="download-report" class="artifact-button disabled" href="#" aria-disabled="true"><span>PDF</span><strong>下载风险分析报告</strong></a>
-        <a id="download-json" class="artifact-button disabled" href="#" aria-disabled="true"><span>JSON</span><strong>下载风险记录</strong></a>
-        <a id="download-log" class="artifact-button disabled" href="#" aria-disabled="true"><span>LOG</span><strong>下载运行日志</strong></a>
+        <a id="download-csv" class="artifact-button disabled" href="#" aria-disabled="true"><span>表格</span><strong>下载解析结果</strong></a>
+        <a id="download-report" class="artifact-button disabled" href="#" aria-disabled="true"><span>报告</span><strong>下载风险分析报告</strong></a>
+        <a id="download-json" class="artifact-button disabled" href="#" aria-disabled="true"><span>数据</span><strong>下载风险记录</strong></a>
+        <a id="download-log" class="artifact-button disabled" href="#" aria-disabled="true"><span>日志</span><strong>下载运行日志</strong></a>
       </div>
 
       <div class="log-panel">
@@ -149,6 +149,6 @@
   </main>
 
   <footer>JWmath · 招投标智能分析 · 风险结果仅供辅助审查</footer>
-  <script src="/static/app.js" defer></script>
+  <script src="/static/app.js?v=20260730-4" defer></script>
 </body>
 </html>
