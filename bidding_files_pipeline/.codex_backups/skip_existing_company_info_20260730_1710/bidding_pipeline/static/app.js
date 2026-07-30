@@ -166,10 +166,6 @@ async function submitJob(event) {
   data.append("category_mode", categoryMode);
   data.append("categories", selectedCategories.join(","));
   data.append("force_ocr", byId("force-ocr").checked ? "true" : "false");
-  data.append(
-    "skip_existing_company_info",
-    byId("skip-existing-company-info").checked ? "true" : "false",
-  );
   byId("start-button").disabled = true;
   try {
     const response = await fetch("/api/jobs", { method: "POST", body: data });
@@ -414,19 +410,14 @@ function renderSpiderProgress(progress) {
   const relatedPercent = relatedTotal > 0 ? Math.floor(relatedFinished * 100 / relatedTotal) : 0;
   const phase = current.phase || "waiting_for_companies";
   const pending = Math.max(0, (Number(root.pending) || 0) + (Number(related.pending) || 0));
-  const existing = Math.max(0, (Number(root.existing) || 0) + (Number(related.existing) || 0));
-  const existingDataOnly = phase === "existing_data_only";
-  const displayPercent = existingDataOnly ? 100 : percent;
-  let detail = `已完成工商信息获取 ${completed} / 已发现企业 ${discovered} 家 · 正在处理 ${running} 家 · 失败 ${failed} 家 · 待核验 ${pending} 家 · 数据已存在 ${existing} 家企业`;
+  let detail = `已完成工商信息获取 ${completed} / 已发现企业 ${discovered} 家 · 正在处理 ${running} 家 · 失败 ${failed} 家 · 待核验 ${pending} 家`;
   if (discovered === 0 && phase === "waiting_for_companies") {
     detail = "等待文件解析完成，尚未发现企业";
   } else if (discovered === 0 && phase === "completed") {
     detail = "未发现需要获取工商信息的企业";
-  } else if (existingDataOnly) {
-    detail = `已使用数据库已有工商信息，跳过获取；数据已存在 ${existing} 家企业`;
   }
-  byId("spider-progress-value").textContent = `${displayPercent}%`;
-  byId("spider-progress-bar").style.width = `${displayPercent}%`;
+  byId("spider-progress-value").textContent = `${percent}%`;
+  byId("spider-progress-bar").style.width = `${percent}%`;
   byId("spider-progress-detail").textContent = detail;
   byId("root-progress-value").textContent = `${rootPercent}%`;
   byId("root-progress-bar").style.width = `${rootPercent}%`;
@@ -435,7 +426,6 @@ function renderSpiderProgress(progress) {
   byId("related-progress-bar").style.width = `${relatedPercent}%`;
   byId("related-progress-detail").textContent = `已发现相关企业：${relatedTotal} 家｜已完成：${Number(related.success) || 0}｜失败：${Number(related.failed) || 0}｜待核验：${Number(related.pending) || 0}｜已有数据：${Number(related.existing) || 0}`;
   byId("expansion-status-detail").textContent = `关系扩展状态：${formatExpansionStatus(current.expansionStatus)}`;
-  byId("related-progress-section").classList.toggle("hidden", existingDataOnly);
 }
 
 /**

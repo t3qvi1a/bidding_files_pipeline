@@ -102,42 +102,6 @@ class WebSecurityTests(unittest.TestCase):
         self.assertIn('id="spider-progress-bar"', response.text)
         self.assertIn('id="root-progress-bar"', response.text)
         self.assertIn('id="related-progress-bar"', response.text)
-        self.assertIn('id="skip-existing-company-info"', response.text)
-
-    def test_create_job_accepts_skip_existing_company_info_form_parameter(self) -> None:
-        """
-        【方法功能】验证创建任务接口接收并持久化“不覆盖已有工商信息”开关。
-        :return: None
-        :Author: gexinyan
-        :CreateTime: 2026-07-30 17:05:00
-        """
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            input_dir = root / "input"
-            input_dir.mkdir()
-            (input_dir / "document.pdf").write_bytes(b"pdf")
-            with patch.dict(
-                "os.environ",
-                {"BIDDING_ALLOWED_INPUT_ROOTS": str(root)},
-            ):
-                app = create_app(root / "runs")
-            manager = app.state.job_manager
-            with patch.object(manager.executor, "submit"):
-                with TestClient(app) as client:
-                    response = client.post(
-                        "/api/jobs",
-                        data={
-                            "local_path": str(input_dir),
-                            "category_mode": "all",
-                            "skip_existing_company_info": "true",
-                        },
-                    )
-
-            self.assertEqual(response.status_code, 202)
-            payload = response.json()
-            self.assertTrue(payload["skipExistingCompanyInfo"])
-            self.assertTrue(manager.get_job(payload["jobId"]).skip_existing_company_info)
-            manager.executor.shutdown(wait=False, cancel_futures=True)
 
 
 class WebJobStateTests(unittest.TestCase):
@@ -260,40 +224,6 @@ class WebJobStateTests(unittest.TestCase):
         )
         self.assertEqual(progress, 30)
 
-    def test_existing_data_only_progress_updates_stage_description(self) -> None:
-        """
-        【方法功能】验证全部复用已有工商信息时任务阶段显示固定说明文字。
-        :return: None
-        :Author: gexinyan
-        :CreateTime: 2026-07-30 16:55:00
-        """
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            manager = JobManager(root)
-            job = JobState(
-                "existing-only",
-                root / "input",
-                root / "output",
-                status="running",
-            )
-            manager.jobs[job.job_id] = job
-            manager._update_structured_progress(
-                job,
-                "spider_progress",
-                {
-                    "discovered": 2,
-                    "completed": 2,
-                    "phase": "existing_data_only",
-                    "root": {"total": 2, "existing": 2},
-                    "related": {"total": 0},
-                    "expansionStatus": "NOT_REQUIRED",
-                },
-            )
-
-            self.assertEqual(job.stage, "已使用数据库已有工商信息，跳过获取")
-            self.assertEqual(job.spider_progress["root"]["existing"], 2)
-            manager.executor.shutdown(wait=False, cancel_futures=True)
-
     def test_parallel_completion_log_is_not_stored_in_web_job_log(self) -> None:
         """
         【方法功能】验证 Web 层忽略旧版并行完成提示，仅保留详细 PDF 进度条。
@@ -356,7 +286,6 @@ class WebJobStateTests(unittest.TestCase):
                 category_mode="include",
                 categories=("award_notice",),
                 force_ocr=True,
-                skip_existing_company_info=True,
                 input_summary="服务器目录：input",
             )
             manager.jobs[job.job_id] = job
@@ -369,8 +298,6 @@ class WebJobStateTests(unittest.TestCase):
             self.assertEqual(restored.source_mode, "local")
             self.assertEqual(restored.categories, ("award_notice",))
             self.assertTrue(restored.force_ocr)
-            self.assertTrue(restored.skip_existing_company_info)
-            self.assertTrue(response["skipExistingCompanyInfo"])
             self.assertTrue(response["canRetry"])
             self.assertEqual(response["inputSummary"], "服务器目录：input")
             restored_manager.executor.shutdown(wait=False, cancel_futures=True)
@@ -396,7 +323,6 @@ class WebJobStateTests(unittest.TestCase):
                 source_mode="local",
                 category_mode="exclude",
                 categories=("archive_info",),
-                skip_existing_company_info=True,
                 input_summary="服务器目录：input",
             )
             manager.jobs[source_job.job_id] = source_job
@@ -408,7 +334,6 @@ class WebJobStateTests(unittest.TestCase):
             self.assertEqual(retried.category_mode, "exclude")
             self.assertEqual(retried.categories, ("archive_info",))
             self.assertEqual(retried.source_mode, "local")
-            self.assertTrue(retried.skip_existing_company_info)
             submit.assert_called_once()
             manager.executor.shutdown(wait=False, cancel_futures=True)
 

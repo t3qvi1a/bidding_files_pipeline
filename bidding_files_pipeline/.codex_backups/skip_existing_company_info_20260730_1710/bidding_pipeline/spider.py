@@ -28,7 +28,6 @@ PENDING_STATUSES = {"pending_submission", "pending_reconciliation", "stale_waiti
 TERMINAL_ENTITY_STATUSES = {"success", "failed", "existing"}
 TERMINAL_EXPANSION_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 Verifier = Callable[[str], VerificationResult]
-BatchVerifier = Callable[[Iterable[str]], dict[str, VerificationResult]]
 SpiderProgressCallback = Callable[[dict[str, Any]], None]
 SpiderRunSubmittedCallback = Callable[[dict[str, Any]], None]
 CancellationRequested = Callable[[], bool]
@@ -1812,15 +1811,12 @@ class CrawlDispatcher:
         enabled: bool = True,
         progress_callback: SpiderProgressCallback | None = None,
         cancel_requested: CancellationRequested | None = None,
-        batch_verifier: BatchVerifier | None = None,
     ) -> None:
         """
         【方法功能】初始化单线程爬虫调度器，保证默认逐企业提交不会并发压垮服务。
         :param client: SpiderClient | None，爬虫客户端；为空时仅记录跳过任务
         :param enabled: bool，是否启用实际爬虫调用
         :param progress_callback: SpiderProgressCallback|None，接收线程安全进度快照的可选回调
-        :param cancel_requested: CancellationRequested|None，读取任务取消状态的可选回调
-        :param batch_verifier: BatchVerifier|None，启用“不覆盖已有工商信息”时的批量核验函数
         :return: None
         :Author: gexinyan
         :CreateTime: 2026-07-16 10:00:00
@@ -1834,12 +1830,9 @@ class CrawlDispatcher:
         )
         self._progress_callback = progress_callback
         self._cancel_requested = cancel_requested or (lambda: False)
-        self._batch_verifier = batch_verifier
         self._lock = threading.RLock()
         self._futures: list[tuple[str, str, Future[list[SpiderTaskResult]]]] = []
         self._completed: list[SpiderTaskResult] = []
-        self._pending_roots: list[tuple[str, str]] = []
-        self._prechecked_existing_count = 0
         self._seen_names: set[str] = set()
         self._run_progresses: dict[str, RunProgress] = {}
         self._progress = CrawlProgress()
@@ -1886,12 +1879,6 @@ class CrawlDispatcher:
                 )
             self._emit_progress()
             return
-        if self._batch_verifier is not None:
-            with self._lock:
-                self._pending_roots.extend((source_pdf, name) for name in names)
-                self._progress = replace(self._progress, phase="collecting_companies")
-            self._emit_progress()
-            return
         for name in names:
             if self._is_cancel_requested():
                 break
@@ -1912,17 +1899,9 @@ class CrawlDispatcher:
         with self._lock:
             if self._waited:
                 return list(self._completed)
-            self._progress = replace(
-                self._progress,
-                phase="prechecking_existing_data" if self._batch_verifier else "waiting_for_completion",
-            )
+            self._progress = replace(self._progress, phase="waiting_for_completion")
         self._emit_progress()
-        final_phase = "completed"
         try:
-            if self._batch_verifier is not None:
-                all_existing = self._precheck_and_schedule()
-                if all_existing:
-                    final_phase = "existing_data_only"
             for source_pdf, company_name, future in self._futures:
                 try:
                     results = future.result()
@@ -1942,90 +1921,14 @@ class CrawlDispatcher:
             with self._lock:
                 self._completed = consolidate_spider_results(self._completed)
                 return list(self._completed)
-        except Exception:
-            final_phase = "failed"
-            raise
         finally:
             if self._executor is not None:
                 self._executor.shutdown(wait=True)
                 self._executor = None
             with self._lock:
                 self._waited = True
-                self._progress = replace(self._progress, phase=final_phase)
+                self._progress = replace(self._progress, phase="completed")
             self._emit_progress()
-
-    def _precheck_and_schedule(self) -> bool:
-        """
-        【方法功能】批量核验已收集的参与投标企业，并仅为缺失详情的企业创建外部获取任务。
-        :return: bool，发现至少一家企业且全部已有有效工商信息时返回 True
-        :raises Exception: 批量数据库核验失败时原样抛出，使 Pipeline 明确失败
-        :Author: gexinyan
-        :CreateTime: 2026-07-30 16:35:00
-        Example: dispatcher._precheck_and_schedule()
-        """
-        if self._batch_verifier is None:
-            return False
-        with self._lock:
-            pending_roots = list(self._pending_roots)
-        verification_by_name = self._batch_verifier(name for _, name in pending_roots)
-        existing_results: list[SpiderTaskResult] = []
-        missing_roots: list[tuple[str, str]] = []
-        for source_pdf, company_name in pending_roots:
-            verification = verification_by_name.get(company_name, VerificationResult(0, {}))
-            if verification.effective_fields:
-                existing_results.append(
-                    SpiderTaskResult(
-                        source_pdf=source_pdf,
-                        company_name=company_name,
-                        request_keyword=company_name,
-                        status="existing",
-                        message="database_precheck_existing",
-                        database_rows=verification.row_count,
-                        effective_fields=verification.effective_fields,
-                        company_type="root",
-                        raw_status="DATABASE_EXISTING",
-                        has_data=True,
-                        expansion_status="NOT_REQUIRED",
-                        original_company_name=company_name,
-                        submitted_company_name=company_name,
-                    )
-                )
-            else:
-                missing_roots.append((source_pdf, company_name))
-        with self._lock:
-            self._completed.extend(existing_results)
-            self._prechecked_existing_count = len(existing_results)
-            self._progress = replace(
-                self._progress,
-                completed=self._progress.completed + len(existing_results),
-                root_existing=self._progress.root_existing + len(existing_results),
-                phase="crawling" if missing_roots else "existing_data_only",
-                expansion_status="WAITING" if missing_roots else "NOT_REQUIRED",
-            )
-        if missing_roots:
-            self._schedule_external_tasks(missing_roots)
-        self._emit_progress()
-        return bool(pending_roots) and not missing_roots
-
-    def _schedule_external_tasks(self, roots: Iterable[tuple[str, str]]) -> None:
-        """
-        【方法功能】把批量预检后缺少有效详情的企业提交到原有单线程外部获取队列。
-        :param roots: Iterable[tuple[str, str]]，来源 PDF 与待获取企业名称组合
-        :return: None
-        :Author: gexinyan
-        :CreateTime: 2026-07-30 16:35:00
-        Example: dispatcher._schedule_external_tasks([("a.pdf", "企业A")])
-        """
-        if self._executor is None:
-            raise RuntimeError("工商信息获取执行器不可用")
-        for source_pdf, company_name in roots:
-            if self._is_cancel_requested():
-                break
-            with self._lock:
-                self._progress = replace(self._progress, queued=self._progress.queued + 1)
-            future = self._executor.submit(self._crawl_company, source_pdf, company_name)
-            with self._lock:
-                self._futures.append((source_pdf, company_name, future))
 
     def _crawl_company(self, source_pdf: str, company_name: str) -> list[SpiderTaskResult]:
         """
@@ -2168,7 +2071,7 @@ class CrawlDispatcher:
             related_pending = related_counts["pending"]
             root_success = sum(item.root_success for item in runs)
             root_failed = sum(item.root_failed for item in runs)
-            root_existing = self._prechecked_existing_count + sum(item.root_existing for item in runs)
+            root_existing = sum(item.root_existing for item in runs)
             root_pending = sum(_status_counts(entity for entity in item.entities if entity.company_type == "root")["pending"] for item in runs)
             phases = {item.expansion_status for item in runs}
             expansion_status = (

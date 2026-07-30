@@ -120,7 +120,7 @@ class ReportingTests(unittest.TestCase):
         }
         template_path = (
             Path(__file__).resolve().parents[2]
-            / "biding_files_risk_reports"
+            / "bidding_files_risk_reports"
             / "expand_risk_reports"
             / "pipeline_risk_reports_template.md"
         )
@@ -220,8 +220,8 @@ class ReportingTests(unittest.TestCase):
             }],
         }
         repository_root = Path(__file__).resolve().parents[2]
-        template_path = repository_root / "biding_files_risk_reports" / "expand_risk_reports" / "pipeline_risk_reports_template.md"
-        renderer_path = repository_root / "biding_files_risk_reports" / "expanded_risk_report_md_to_pdf.py"
+        template_path = repository_root / "bidding_files_risk_reports" / "expand_risk_reports" / "pipeline_risk_reports_template.md"
+        renderer_path = repository_root / "bidding_files_risk_reports" / "expanded_risk_report_md_to_pdf.py"
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             json_path = root / "risk.json"

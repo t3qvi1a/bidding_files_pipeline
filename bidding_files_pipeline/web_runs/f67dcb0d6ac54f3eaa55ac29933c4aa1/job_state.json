@@ -45,6 +45,7 @@
   "categoryMode": "all",
   "categories": [],
   "forceOcr": false,
+  "skipExistingCompanyInfo": false,
   "inputSummary": "",
   "spiderRuns": [],
   "remoteCancellation": {}

@@ -331,7 +331,6 @@ class RunnerTests(unittest.TestCase):
                 database=DatabaseConfig("host", 15400, "db", "user", "password"),
                 spider_result_database="db",
                 spider=SpiderConfig("http://spider"),
-                skip_existing_company_info=True,
             )
             api = OcrApi(FakeProcessingConfig, fake_process_pdf_tree)
             with (

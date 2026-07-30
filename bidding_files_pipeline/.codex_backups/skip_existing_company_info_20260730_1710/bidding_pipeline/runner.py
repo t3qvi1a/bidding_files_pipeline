@@ -56,7 +56,6 @@ class PipelineConfig:
         spider: SpiderConfig，爬虫 HTTP 配置
         report_template: Path | None，风险报告 Markdown 模板路径
         report_renderer: Path | None，现有 Markdown 转 PDF 脚本路径
-        skip_existing_company_info: bool，是否复用数据库已有有效工商信息
         skip_spider: bool，是否跳过外部爬虫
         skip_risk_analysis: bool，是否跳过风险分析和报告生成
         dry_run: bool，是否跳过爬虫和数据库写入
@@ -80,7 +79,6 @@ class PipelineConfig:
     spider: SpiderConfig
     report_template: Path | None = None
     report_renderer: Path | None = None
-    skip_existing_company_info: bool = False
     skip_spider: bool = False
     skip_risk_analysis: bool = False
     dry_run: bool = False
@@ -289,7 +287,6 @@ def pipeline_config_to_dict(config: PipelineConfig) -> dict[str, Any]:
         },
         "reportRenderer": str(config.report_renderer) if config.report_renderer else None,
         "reportTemplate": str(config.report_template) if config.report_template else None,
-        "skipExistingCompanyInfo": config.skip_existing_company_info,
         "skipSpider": config.skip_spider,
         "skipRiskAnalysis": config.skip_risk_analysis,
         "dryRun": config.dry_run,
@@ -690,10 +687,7 @@ def run_pipeline(
         cancel_requested=cancel_requested,
     )
     try:
-        if config.skip_existing_company_info:
-            progress_callback("[阶段 1/5] 开始解析 PDF 文件，解析完成后将批量核验已有工商信息。")
-        else:
-            progress_callback("[阶段 1/5] 开始解析 PDF 文件，工商信息获取将在每份 PDF 解析完成后立即启动。")
+        progress_callback("[阶段 1/5] 开始解析 PDF 文件，企业爬虫将在每份 PDF 解析完成后立即启动。")
         api = load_ocr_api(config.ocr_source)
         processing_config = api.processing_config_type(
             dpi=config.dpi,
@@ -725,20 +719,8 @@ def run_pipeline(
             pdf_progress_callback=lambda snapshot: emit_structured_progress("pdf_progress", snapshot),
         )
         ocr_summary = summary.to_dict()
-        progress_callback("[阶段 2/5] PDF 解析完成，正在处理工商信息获取任务。")
+        progress_callback("[阶段 2/5] PDF 解析完成，正在等待企业爬虫任务收尾。")
         spider_results = dispatcher.wait()
-        spider_statistics = build_spider_statistics(spider_results)
-        root_statistics = spider_statistics["root"]
-        if config.skip_existing_company_info:
-            pending_external_count = max(0, root_statistics["total"] - root_statistics["existing"])
-            progress_callback(
-                "工商信息预核验完成：参与投标企业 "
-                f"{root_statistics['total']} 家；已有有效工商信息 "
-                f"{root_statistics['existing']} 家，跳过外部获取；"
-                f"进入外部获取流程 {pending_external_count} 家。"
-            )
-            if root_statistics["total"] > 0 and pending_external_count == 0:
-                progress_callback("已使用数据库已有工商信息，跳过获取")
         crawl_audit = build_crawl_audit(run_id, spider_results)
         write_json(output_dir / "crawl_results.json", crawl_audit)
         write_spider_name_review_queue(output_dir, spider_results)
@@ -747,7 +729,7 @@ def run_pipeline(
         if config.dry_run:
             progress_callback(f"Dry-run 完成：解析到 {final_record_count} 条最终记录，未调用爬虫或数据库。")
         else:
-            progress_callback("[阶段 3/5] 工商信息获取完成，开始写入 PDF 解析结果。")
+            progress_callback("[阶段 3/5] 企业爬虫完成，开始写入 PDF 解析结果。")
             persistence = ResultDatabaseWriter(config.database).persist(final_records, run_id)
             progress_callback(
                 f"最终结果已写入 {persistence.schema}.{persistence.table}：{persistence.record_count} 条。"
@@ -879,18 +861,15 @@ def _build_dispatcher(
             cancel_requested=cancel_requested,
         )
     verifier_config = replace(config.database, database=config.spider_result_database, table="spider_data_company")
-    data_verifier = SpiderDataVerifier(verifier_config)
+    verifier = SpiderDataVerifier(verifier_config).verify
     return CrawlDispatcher(
         SpiderClient(
             config.spider,
-            verifier=data_verifier.verify,
+            verifier=verifier,
             run_submitted_callback=spider_run_submitted_callback,
             cancel_requested=cancel_requested,
         ),
         enabled=True,
         progress_callback=progress_callback,
         cancel_requested=cancel_requested,
-        batch_verifier=(
-            data_verifier.verify_many if config.skip_existing_company_info else None
-        ),
     )

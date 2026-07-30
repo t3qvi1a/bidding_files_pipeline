@@ -76,10 +76,6 @@
             <span><strong>强制重新文字识别</strong><small>忽略已有解析结果并重新识别</small></span>
             <input id="force-ocr" name="force_ocr" type="checkbox">
           </label>
-          <label class="toggle-row">
-            <span><strong>不覆盖已有工商信息</strong><small>已有有效工商信息的参与投标企业将直接使用数据库现有数据</small></span>
-            <input id="skip-existing-company-info" name="skip_existing_company_info" type="checkbox">
-          </label>
         </div>
       </div>
 
@@ -121,14 +117,12 @@
               <div class="progress-track"><div id="root-progress-bar" class="progress-bar root-progress-bar"></div></div>
             </div>
             <p id="root-progress-detail" class="progress-detail">参与投标企业：0 家｜已完成：0｜失败：0｜已有数据：0</p>
-            <div id="related-progress-section">
-              <div class="enterprise-progress-group">
-                <div class="progress-meta"><span>相关企业信息获取进度</span><strong id="related-progress-value">0%</strong></div>
-                <div class="progress-track"><div id="related-progress-bar" class="progress-bar related-progress-bar"></div></div>
-              </div>
-              <p id="related-progress-detail" class="progress-detail">已发现相关企业：0 家｜已完成：0｜失败：0｜已有数据：0</p>
-              <p id="expansion-status-detail" class="progress-detail">关系扩展状态：WAITING</p>
+            <div class="enterprise-progress-group">
+              <div class="progress-meta"><span>相关企业信息获取进度</span><strong id="related-progress-value">0%</strong></div>
+              <div class="progress-track"><div id="related-progress-bar" class="progress-bar related-progress-bar"></div></div>
             </div>
+            <p id="related-progress-detail" class="progress-detail">已发现相关企业：0 家｜已完成：0｜失败：0｜已有数据：0</p>
+            <p id="expansion-status-detail" class="progress-detail">关系扩展状态：WAITING</p>
           </section>
         </div>
         <ol class="stage-list">
@@ -155,6 +149,6 @@
   </main>
 
   <footer>JWmath · 招投标智能分析 · 风险结果仅供辅助审查</footer>
-  <script src="/static/app.js?v=20260730-6" defer></script>
+  <script src="/static/app.js?v=20260730-5" defer></script>
 </body>
 </html>

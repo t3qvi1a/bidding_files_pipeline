@@ -21,7 +21,7 @@ import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -208,7 +208,6 @@ class JobState:
         category_mode: str，all/include/exclude 类别模式
         categories: tuple[str, ...]，选择的 OCR 类别
         force_ocr: bool，是否忽略 OCR 缓存
-        skip_existing_company_info: bool，是否复用数据库已有有效工商信息
         input_summary: str，可安全展示的输入摘要
     :Author: gexinyan
     :CreateTime: 2026-07-16 16:20:00
@@ -231,7 +230,6 @@ class JobState:
     category_mode: str = "all"
     categories: tuple[str, ...] = field(default_factory=tuple)
     force_ocr: bool = False
-    skip_existing_company_info: bool = False
     input_summary: str = ""
     spider_runs: list[dict[str, Any]] = field(default_factory=list)
     remote_cancellation: dict[str, Any] = field(default_factory=dict)
@@ -284,7 +282,6 @@ class JobState:
             "categoryMode": self.category_mode,
             "categories": list(self.categories),
             "forceOcr": self.force_ocr,
-            "skipExistingCompanyInfo": self.skip_existing_company_info,
             "remoteCancellation": self.remote_cancellation_summary(),
         }
 
@@ -312,7 +309,6 @@ class JobState:
             "categoryMode": self.category_mode,
             "categories": list(self.categories),
             "forceOcr": self.force_ocr,
-            "skipExistingCompanyInfo": self.skip_existing_company_info,
             "inputSummary": self.input_summary,
             "spiderRuns": self.spider_runs,
             "remoteCancellation": self.remote_cancellation,
@@ -349,7 +345,6 @@ class JobState:
             category_mode=str(payload.get("categoryMode", "all")),
             categories=tuple(str(value) for value in payload.get("categories", [])),
             force_ocr=bool(payload.get("forceOcr", False)),
-            skip_existing_company_info=bool(payload.get("skipExistingCompanyInfo", False)),
             input_summary=str(payload.get("inputSummary", "")),
             spider_runs=[dict(item) for item in payload.get("spiderRuns", []) if isinstance(item, dict)],
             remote_cancellation=(
@@ -600,7 +595,6 @@ class JobManager:
         category_mode: str,
         categories: tuple[str, ...],
         force_ocr: bool,
-        skip_existing_company_info: bool = False,
         source_mode: str = "",
         input_summary: str = "",
     ) -> JobState:
@@ -610,7 +604,6 @@ class JobManager:
         :param category_mode: str，all/include/exclude 类别模式
         :param categories: tuple[str, ...]，选择的 OCR 类别
         :param force_ocr: bool，是否忽略 OCR 缓存
-        :param skip_existing_company_info: bool，是否复用数据库已有有效工商信息
         :param source_mode: str，upload/local 输入来源
         :param input_summary: str，可安全展示的输入摘要
         :return: JobState，已进入队列的任务状态
@@ -629,20 +622,12 @@ class JobManager:
             category_mode=category_mode,
             categories=categories,
             force_ocr=force_ocr,
-            skip_existing_company_info=skip_existing_company_info,
             input_summary=input_summary,
         )
         with self.lock:
             self.jobs[job_id] = job
             self._persist_job(job)
-        self.executor.submit(
-            self._run_job,
-            job,
-            category_mode,
-            categories,
-            force_ocr,
-            skip_existing_company_info,
-        )
+        self.executor.submit(self._run_job, job, category_mode, categories, force_ocr)
         return job
 
     def retry_job(self, job_id: str, allowed_roots: tuple[Path, ...]) -> JobState:
@@ -666,7 +651,6 @@ class JobManager:
             category_mode = source_job.category_mode
             categories = source_job.categories
             force_ocr = source_job.force_ocr
-            skip_existing_company_info = source_job.skip_existing_company_info
             input_summary = source_job.input_summary
         if source_mode == "upload":
             upload_root = (self.work_root / "uploads").resolve()
@@ -681,7 +665,6 @@ class JobManager:
             category_mode,
             categories,
             force_ocr,
-            skip_existing_company_info,
             source_mode=source_mode,
             input_summary=input_summary,
         )
@@ -795,8 +778,6 @@ class JobManager:
                 job.pdf_progress = normalize_pdf_progress(value)
             elif event_type == "spider_progress":
                 job.spider_progress = normalize_spider_progress(value)
-                if job.spider_progress.get("phase") == "existing_data_only":
-                    job.stage = "已使用数据库已有工商信息，跳过获取"
             else:
                 return
             self._persist_job(job)
@@ -900,7 +881,6 @@ class JobManager:
         category_mode: str,
         categories: tuple[str, ...],
         force_ocr: bool,
-        skip_existing_company_info: bool,
     ) -> None:
         """
         【方法功能】构建 Pipeline 配置、执行任务并登记最终产物。
@@ -908,7 +888,6 @@ class JobManager:
         :param category_mode: str，类别筛选模式
         :param categories: tuple[str, ...]，选择的 OCR 类别
         :param force_ocr: bool，是否忽略 OCR 缓存
-        :param skip_existing_company_info: bool，是否复用数据库已有有效工商信息
         :return: None
         :Author: gexinyan
         :CreateTime: 2026-07-16 16:20:00
@@ -931,7 +910,6 @@ class JobManager:
                 category_mode,
                 categories,
                 force_ocr,
-                skip_existing_company_info,
             )
             event_queue = self.process_context.Queue()
             cancel_event = self.process_context.Event()
@@ -1279,7 +1257,6 @@ def build_web_pipeline_config(
     category_mode: str,
     categories: tuple[str, ...],
     force_ocr: bool,
-    skip_existing_company_info: bool = False,
 ) -> Any:
     """
     【函数功能】复用 CLI 参数规则构建 Web 任务 PipelineConfig。
@@ -1288,7 +1265,6 @@ def build_web_pipeline_config(
     :param category_mode: str，all/include/exclude 类别模式
     :param categories: tuple[str, ...]，选择类别
     :param force_ocr: bool，是否忽略 OCR 缓存
-    :param skip_existing_company_info: bool，是否复用数据库已有有效工商信息
     :return: PipelineConfig，完整流水线配置
     :raises ValueError: 类别模式或类别值不合法时抛出
     :Author: gexinyan
@@ -1308,10 +1284,7 @@ def build_web_pipeline_config(
     if force_ocr:
         arguments.append("--force")
     args = build_argument_parser().parse_args(arguments)
-    return replace(
-        build_pipeline_config(args),
-        skip_existing_company_info=skip_existing_company_info,
-    )
+    return build_pipeline_config(args)
 
 
 def create_app(work_root: Path | None = None) -> FastAPI:
@@ -1363,7 +1336,6 @@ def create_app(work_root: Path | None = None) -> FastAPI:
         category_mode: str = Form(default="all"),
         categories: str = Form(default=""),
         force_ocr: bool = Form(default=False),
-        skip_existing_company_info: bool = Form(default=False),
     ) -> dict[str, Any]:
         """
         【函数功能】校验上传或本地路径并创建后台 Pipeline 任务。
@@ -1372,7 +1344,6 @@ def create_app(work_root: Path | None = None) -> FastAPI:
         :param category_mode: str，all/include/exclude 类别模式
         :param categories: str，逗号分隔类别
         :param force_ocr: bool，是否忽略 OCR 缓存
-        :param skip_existing_company_info: bool，是否复用数据库已有有效工商信息
         :return: dict[str, Any]，已创建任务状态
         :raises HTTPException: 输入不合法时返回 400
         :Author: gexinyan
@@ -1398,7 +1369,6 @@ def create_app(work_root: Path | None = None) -> FastAPI:
                 category_mode,
                 category_values,
                 force_ocr,
-                skip_existing_company_info,
                 source_mode=source_mode,
                 input_summary=input_summary,
             )

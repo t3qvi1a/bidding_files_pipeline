@@ -49,6 +49,7 @@
     "bid_candidates"
   ],
   "forceOcr": true,
+  "skipExistingCompanyInfo": false,
   "inputSummary": "服务器目录：bidding_files",
   "spiderRuns": [],
   "remoteCancellation": {}

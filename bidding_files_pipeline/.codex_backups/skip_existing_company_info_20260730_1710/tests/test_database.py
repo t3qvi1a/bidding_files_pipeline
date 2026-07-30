@@ -11,7 +11,7 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
-from bidding_pipeline.database import DatabaseConfig, ResultDatabaseWriter, SpiderDataVerifier
+from bidding_pipeline.database import DatabaseConfig, ResultDatabaseWriter
 from bidding_pipeline.records import ExtractionResult
 
 
@@ -178,82 +178,3 @@ class DatabaseWriterTests(unittest.TestCase):
         self.assertEqual(cursor.sql[-1].lstrip().startswith("INSERT INTO"), True)
         self.assertEqual(summary.record_count, 1)
         self.assertTrue(connection.closed)
-
-
-class SpiderDataVerifierTests(unittest.TestCase):
-    """
-    【类功能】覆盖企业工商详情批量预检的连接、SQL 与有效字段判定。
-    :Author: gexinyan
-    :CreateTime: 2026-07-30 16:45:00
-    """
-
-    def test_verify_many_uses_one_connection_and_rejects_empty_shell_records(self) -> None:
-        """
-        【方法功能】验证批量查询只连接一次，并把空壳、删除和未精确匹配记录排除在有效数据外。
-        :return: None
-        :Author: gexinyan
-        :CreateTime: 2026-07-30 16:45:00
-        """
-        class BatchCursor(FakeCursor):
-            """
-            【类功能】返回企业详情批量核验测试数据并记录查询参数。
-            :Author: gexinyan
-            :CreateTime: 2026-07-30 16:45:00
-            """
-
-            def __init__(self) -> None:
-                """
-                【方法功能】初始化批量查询记录和固定结果集。
-                :return: None
-                :Author: gexinyan
-                :CreateTime: 2026-07-30 16:45:00
-                """
-                super().__init__()
-                self.params: object = None
-
-            def execute(self, sql: str, params: object = None) -> None:
-                """
-                【方法功能】记录批量核验 SQL 及其参数。
-                :param sql: str，参数化 SQL
-                :param params: object，企业名称数组参数
-                :return: None
-                :Author: gexinyan
-                :CreateTime: 2026-07-30 16:45:00
-                """
-                self.sql.append(sql)
-                self.params = params
-
-            def fetchall(self) -> list[tuple[object, ...]]:
-                """
-                【方法功能】返回一条有效记录和一条仅含名称的空壳记录。
-                :return: list[tuple[object, ...]]，按查询字段顺序排列的模拟数据
-                :Author: gexinyan
-                :CreateTime: 2026-07-30 16:45:00
-                """
-                return [
-                    ("企业A", "企业A", "13800000000", "", "9132"),
-                    ("企业B", "企业B", "", "", ""),
-                    ("其他企业", "其他企业", "13900000000", "", "9133"),
-                ]
-
-        cursor = BatchCursor()
-        connection = FakeConnection(cursor)
-        config = DatabaseConfig("host", 15400, "big_data", "user", "secret")
-        columns = {
-            "company_name", "search_value", "phone_number", "email",
-            "credit_code", "delete_flag",
-        }
-        with (
-            patch("bidding_pipeline.database.open_connection", return_value=connection) as open_mock,
-            patch("bidding_pipeline.database.table_columns", return_value=columns),
-        ):
-            results = SpiderDataVerifier(config).verify_many(["企业A", "企业B", "企业A"])
-
-        open_mock.assert_called_once()
-        self.assertTrue(connection.closed)
-        self.assertIn("ANY(%s)", cursor.sql[-1])
-        self.assertIn("delete_flag", cursor.sql[-1])
-        self.assertEqual(cursor.params, (["企业A", "企业B"], ["企业A", "企业B"]))
-        self.assertEqual(results["企业A"].effective_fields["phone_number"], "13800000000")
-        self.assertEqual(results["企业B"].row_count, 1)
-        self.assertEqual(results["企业B"].effective_fields, {})

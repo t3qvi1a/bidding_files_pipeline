@@ -32,28 +32,13 @@ RESULT_COLUMNS = (
     "review_status",
     "generated_at",
 )
-COMPANY_DETAIL_FIELDS = (
+BUSINESS_FIELDS = (
+    "company_name",
+    "search_value",
     "phone_number",
     "email",
     "credit_code",
     "legal_person",
-    "business_status",
-    "establish_date",
-    "reg_capital",
-    "paid_capital",
-    "insured_count",
-    "org_code",
-    "reg_number",
-    "taxpayer_id",
-    "company_type",
-    "business_period",
-    "approval_date",
-    "region",
-    "industry",
-    "registration_authority",
-    "english_name",
-    "reg_address",
-    "mail_address",
 )
 
 
@@ -430,75 +415,33 @@ class SpiderDataVerifier:
         :Author: gexinyan
         :CreateTime: 2026-07-16 10:00:00
         """
-        normalized_name = normalize_text(company_name)
-        if not normalized_name:
-            return VerificationResult(0, {})
-        return self.verify_many([normalized_name])[normalized_name]
-
-    def verify_many(self, company_names: Iterable[str]) -> dict[str, VerificationResult]:
-        """
-        【方法功能】使用单次数据库连接批量核验企业是否已有非删除且有效的工商详情。
-        :param company_names: Iterable[str]，待精确匹配并按首次出现顺序去重的企业名称
-        :return: dict[str, VerificationResult]，以规范化输入企业名称为键的核验结果
-        :raises RuntimeError: 企业详情表缺少名称匹配字段或有效详情字段时抛出
-        :raises Exception: 数据库连接或查询失败时由底层驱动抛出
-        :Author: gexinyan
-        :CreateTime: 2026-07-30 16:30:00
-        Example: verifier.verify_many(["企业A", "企业B"])
-        """
-        names = list(dict.fromkeys(normalize_text(name) for name in company_names if normalize_text(name)))
-        if not names:
-            return {}
         connection = open_connection(self.config)
         try:
             with connection.cursor() as cursor:
                 available = table_columns(cursor, self.config.schema, self.config.table)
-                match_fields = [field for field in ("company_name", "search_value") if field in available]
-                detail_fields = [field for field in COMPANY_DETAIL_FIELDS if field in available]
-                if not match_fields or not detail_fields:
-                    raise RuntimeError("企业详情表缺少名称匹配字段或有效工商详情字段")
-                selected_fields = match_fields + detail_fields
-                fields_sql = ", ".join(quote_ident(field) for field in selected_fields)
-                predicates = [f"BTRIM({quote_ident(field)}) = ANY(%s)" for field in match_fields]
-                params: list[Any] = [names for _ in match_fields]
-                if "delete_flag" in available:
-                    predicates_sql = (
-                        f"({' OR '.join(predicates)}) AND "
-                        f"COALESCE({quote_ident('delete_flag')}, 'NOT_DELETE') <> 'DELETE'"
-                    )
-                else:
-                    predicates_sql = f"({' OR '.join(predicates)})"
+                selected = [field for field in BUSINESS_FIELDS if field in available]
+                predicates: list[str] = []
+                params: list[str] = []
+                if "company_name" in available:
+                    predicates.append(f"{quote_ident('company_name')} = %s")
+                    params.append(company_name)
+                if "search_value" in available:
+                    predicates.append(f"{quote_ident('search_value')} = %s")
+                    params.append(company_name)
+                if not selected or not predicates:
+                    raise RuntimeError("爬虫结果表缺少 company_name/search_value 等必要字段")
+                fields_sql = ", ".join(quote_ident(field) for field in selected)
                 target = qualified_name(self.config.schema, self.config.table)
                 cursor.execute(
-                    f"SELECT {fields_sql} FROM {target} WHERE {predicates_sql}",
+                    f"SELECT {fields_sql} FROM {target} WHERE {' OR '.join(predicates)}",
                     tuple(params),
                 )
                 rows = cursor.fetchall()
+                effective_fields = {
+                    field: normalize_text(value)
+                    for field, value in zip(selected, rows[0] if rows else ())
+                    if normalize_text(value)
+                }
+                return VerificationResult(len(rows), effective_fields)
         finally:
             connection.close()
-
-        name_set = set(names)
-        row_counts = {name: 0 for name in names}
-        effective_by_name: dict[str, dict[str, str]] = {name: {} for name in names}
-        match_count = len(match_fields)
-        for row in rows:
-            matched_names = {
-                normalize_text(value)
-                for value in row[:match_count]
-                if normalize_text(value) in name_set
-            }
-            if not matched_names:
-                continue
-            row_details = {
-                field: normalize_text(value)
-                for field, value in zip(detail_fields, row[match_count:])
-                if normalize_text(value)
-            }
-            for matched_name in matched_names:
-                row_counts[matched_name] += 1
-                for field, value in row_details.items():
-                    effective_by_name[matched_name].setdefault(field, value)
-        return {
-            name: VerificationResult(row_counts[name], effective_by_name[name])
-            for name in names
-        }
