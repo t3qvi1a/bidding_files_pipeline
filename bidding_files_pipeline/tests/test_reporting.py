@@ -178,16 +178,16 @@ class ReportingTests(unittest.TestCase):
         )
         self.assertNotIn("关联企业C", [item["重合对象"] for item in context["风险问题条目"]])
 
-    def test_report_title_uses_single_project_and_falls_back_for_multiple_projects(self) -> None:
+    def test_report_title_is_fixed_for_all_task_scopes(self) -> None:
         """
-        【方法功能】验证单项目标题使用项目名，多项目标题使用批次通用名称。
+        【方法功能】验证新版报告始终使用惠山区高标准农田固定标题。
         :return: None
         :Author: gexinyan
         :CreateTime: 2026-07-30 16:25:19
         """
         payload = sample_payload([])
         self.assertEqual(
-            "测试项目招投标企业风险横向分析报告",
+            "惠山区高标准农田项目招投标企业风险横向分析报告",
             build_template_context(payload)["报告标题"],
         )
         payload["projects"].append(
@@ -199,7 +199,7 @@ class ReportingTests(unittest.TestCase):
             }
         )
         self.assertEqual(
-            "本批次招投标项目企业风险横向分析报告",
+            "惠山区高标准农田项目招投标企业风险横向分析报告",
             build_template_context(payload)["报告标题"],
         )
 
@@ -267,14 +267,78 @@ class ReportingTests(unittest.TestCase):
             build_template_context(payload),
         )
 
-        self.assertIn("测试项目招投标企业风险横向分析报告", rendered)
+        self.assertIn("惠山区高标准农田项目招投标企业风险横向分析报告", rendered)
         self.assertIn("固定电话相同", rendered)
-        self.assertIn("SHAREHOLDER/DIRECT_INVESTMENT/张三", rendered)
+        self.assertIn("两家公司的股东相同，名称为**张三**", rendered)
         self.assertIn("企业工商详情", rendered)
         self.assertIn("历史共同项目", rendered)
+        self.assertIn("<br/>", rendered)
         self.assertIn('color:#8B0000', rendered)
         self.assertIn('color:#1D4ED8', rendered)
+        self.assertIn("高标农田招投标项目八大风险点", rendered)
+        self.assertIn("建议采用分层核验方式推进后续处置", rendered)
+        self.assertNotIn("运行标识", rendered)
+        self.assertNotIn("发现的关联企业", rendered)
+        self.assertNotIn("有效企业关系记录", rendered)
+        self.assertNotIn("本报告展示风险线索", rendered)
         self.assertNotIn("{{", rendered)
+
+    def test_template_uses_two_column_companies_and_removes_legacy_placeholders(self) -> None:
+        """
+        【方法功能】验证参与投标企业双栏排版及已废弃占位符均不进入新版模板。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-30 18:10:00
+        """
+        payload = sample_payload([])
+        payload["projects"][0]["companies"] = ["企业A", "企业B", "企业C"]
+        context = build_template_context(payload)
+        self.assertEqual(
+            [
+                {"左序号": 1, "左名称": "企业A", "右序号": 2, "右名称": "企业B"},
+                {"左序号": 3, "左名称": "企业C", "右序号": "", "右名称": ""},
+            ],
+            context["参与投标企业行"],
+        )
+        template = (
+            repository_root()
+            / "bidding_files_risk_reports"
+            / "pipeline_relationship_risk_report_template.md"
+        ).read_text(encoding="utf-8")
+        removed_placeholders = (
+            "企业身份重合风险数量", "共享联系电话涉及项目数", "共享联系电话风险数量",
+            "共享股东涉及项目数", "共享股东风险数量", "共享邮箱涉及项目数",
+            "共享邮箱风险数量", "共享高级职员涉及项目数", "共享高级职员风险数量",
+            "关系记录总数", "关联公司与关联公司风险数量", "关联公司总数",
+            "匹配关联公司总数", "待对账企业数", "未匹配关联公司总数", "未匹配根公司总数",
+            "根公司与关联公司风险数量", "根公司与根公司风险数量", "根公司总数",
+            "涉及风险项目数", "风险项目占比",
+        )
+        for placeholder in removed_placeholders:
+            self.assertNotIn(f"{{{{{placeholder}}}}}", template)
+        rendered = render_template(template, context)
+        self.assertNotIn("{{", rendered)
+
+    def test_relation_summary_combines_shareholder_and_senior_staff_without_raw_codes(self) -> None:
+        """
+        【方法功能】验证关系依据使用中文名称并合并同一人员的股东和高级职员关系。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-30 18:10:00
+        """
+        risk = risk_record("shared_email", "risk@example.com", "relationship")
+        related_company = risk["companies"][1]
+        related_company["relations"].append(
+            {"sourceType": "SENIOR_STAFF", "personName": "张三"}
+        )
+        context = build_template_context(sample_payload([risk]))
+        relation_text = context["风险问题条目"][0]["企业关系"]
+        evidence_text = context["风险问题条目"][0]["原始数据核验行"][1]["企业关联关系"]
+        expected = "两家公司的股东和高级职员相同，名称为**张三**"
+        self.assertIn(expected, relation_text)
+        self.assertIn(expected, evidence_text)
+        self.assertNotIn("SHAREHOLDER", relation_text)
+        self.assertNotIn("SENIOR_STAFF", relation_text)
 
     def test_only_company_identity_risk_renders_as_no_visible_risk(self) -> None:
         """

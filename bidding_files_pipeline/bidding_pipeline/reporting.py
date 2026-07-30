@@ -187,22 +187,50 @@ def relation_summary(company: dict[str, Any]) -> str:
     if company.get("entityRole", "root") == "root":
         return f"**{company_name}**是参与投标企业。"
     root_company = normalize_text(company.get("rootCompanyName"), "未识别投标根公司")
-    relation_details = []
-    for relation in company.get("relations", []):
-        if not isinstance(relation, dict):
-            continue
-        values = [
-            normalize_text(relation.get(field_name))
-            for field_name in ("sourceType", "relationType", "personName", "position", "holdingRatio")
-        ]
-        detail = "/".join(value for value in values if value)
-        if detail:
-            relation_details.append(detail)
-    detail_text = "、".join(dict.fromkeys(relation_details)) or "关系详情未披露"
+    relation_details = relation_evidence_descriptions(company.get("relations", []))
+    detail_text = "；".join(relation_details) or "两家公司的企业关系记录显示存在关联，具体关系详情未披露"
     return (
         f"**{company_name}**未参与投标；**{company_name}**与参与投标企业"
-        f"**{root_company}**存在关联关系，关系依据为{detail_text}。"
+        f"**{root_company}**存在关联关系，关系依据为：“{detail_text}”。"
     )
+
+
+def relation_evidence_descriptions(relations: Any) -> list[str]:
+    """
+    【函数功能】将企业关系记录归并为适合风险报告展示的中文关联依据。
+    :param relations: Any，企业端点中的原始关联关系列表
+    :return: list[str]，去重后的关联依据说明
+    :Author: gexinyan
+    :CreateTime: 2026-07-30 18:10:00
+    Example: relation_evidence_descriptions([{"sourceType": "SHAREHOLDER", "personName": "张三"}])
+    """
+    grouped_types: dict[str, set[str]] = defaultdict(set)
+    for relation in relations if isinstance(relations, list) else []:
+        if not isinstance(relation, dict):
+            continue
+        raw_types = " ".join(
+            normalize_text(relation.get(field_name)).upper()
+            for field_name in ("sourceType", "relationType")
+        )
+        relationship_types = set()
+        if "SHAREHOLDER" in raw_types or "股东" in raw_types:
+            relationship_types.add("股东")
+        if "SENIOR_STAFF" in raw_types or "高级职员" in raw_types or "高管" in raw_types:
+            relationship_types.add("高级职员")
+        person_name = normalize_text(relation.get("personName"), "未披露")
+        if relationship_types:
+            grouped_types[person_name].update(relationship_types)
+
+    descriptions = []
+    for person_name, relationship_types in sorted(grouped_types.items()):
+        type_text = "和".join(
+            item for item in ("股东", "高级职员") if item in relationship_types
+        )
+        if person_name == "未披露":
+            descriptions.append(f"两家公司的{type_text}信息存在重合，相关人员名称未披露")
+        else:
+            descriptions.append(f"两家公司的{type_text}相同，名称为**{person_name}**")
+    return descriptions
 
 
 def evidence_rows(risk: dict[str, Any]) -> list[dict[str, str]]:
@@ -504,7 +532,7 @@ def historical_project_rows(risk: dict[str, Any]) -> list[dict[str, str]]:
         rows.append(
             {
                 "共同参与项目": markdown_cell(project_display_name(project)),
-                "所有参与企业": "、".join(
+                "所有参与企业": "<br/>".join(
                     format_company_name(name, risk_companies, winners) for name in sorted(bidders)
                 ) or "未识别投标企业",
                 "投标结果": "<br/>".join(
@@ -541,6 +569,64 @@ def risk_description(risk: dict[str, Any]) -> str:
     )
 
 
+def two_column_name_rows(company_names: Sequence[str]) -> list[dict[str, str | int]]:
+    """
+    【函数功能】将企业名称按两列编号排布为报告模板行数据。
+    :param company_names: Sequence[str]，已排序的参与投标企业名称
+    :return: list[dict[str, str | int]]，包含左右序号和名称的双栏行数据
+    :Author: gexinyan
+    :CreateTime: 2026-07-30 18:10:00
+    Example: two_column_name_rows(["企业A", "企业B", "企业C"])
+    """
+    rows = []
+    for start_index in range(0, len(company_names), 2):
+        left_name = company_names[start_index]
+        right_index = start_index + 1
+        right_name = company_names[right_index] if right_index < len(company_names) else ""
+        rows.append(
+            {
+                "左序号": start_index + 1,
+                "左名称": markdown_cell(left_name),
+                "右序号": right_index + 1 if right_name else "",
+                "右名称": markdown_cell(right_name) if right_name else "",
+            }
+        )
+    return rows
+
+
+def cross_network_statistics(visible_risks: Sequence[dict[str, Any]]) -> tuple[int, str]:
+    """
+    【函数功能】统计可展示风险涉及的投标企业组合及其历史共同参投补充证据。
+    :param visible_risks: Sequence[dict[str, Any]]，已过滤企业身份重合后的风险记录
+    :return: tuple[int, str]，企业组合数量和可直接填入结论的共同项目说明
+    :Author: gexinyan
+    :CreateTime: 2026-07-30 18:10:00
+    Example: cross_network_statistics([])
+    """
+    company_pairs = set()
+    common_project_names = set()
+    for risk in visible_risks:
+        root_companies = sorted(
+            {
+                normalize_text(company_name)
+                for company_name in risk.get("rootCompanies", [])
+                if normalize_text(company_name)
+            }
+        )
+        if len(root_companies) >= 2:
+            company_pairs.update(itertools.combinations(root_companies, 2))
+        for project in risk.get("commonProjects", []):
+            if isinstance(project, dict):
+                common_project_names.add(project_display_name(project))
+    if common_project_names:
+        common_project_analysis = (
+            f"风险 JSON 已提供 {len(common_project_names)} 个历史共同参投项目作为补充证据，"
+        )
+    else:
+        common_project_analysis = "风险 JSON 未提供历史共同参投项目的补充证据，"
+    return len(company_pairs), common_project_analysis
+
+
 def build_template_context(payload: dict[str, Any]) -> dict[str, Any]:
     """
     【函数功能】将 Pipeline schemaVersion 2.0 风险 JSON 转换为新版报告模板上下文。
@@ -555,20 +641,9 @@ def build_template_context(payload: dict[str, Any]) -> dict[str, Any]:
     projects = payload["projects"]
     visible_risks = [risk for risk in payload["risks"] if adapted_risk_type(risk)]
     risk_counts = Counter(adapted_risk_type(risk) for risk in visible_risks)
-    project_names = list(
-        dict.fromkeys(
-            normalize_text(project.get("projectName") or project.get("lotName"))
-            for project in projects
-            if normalize_text(project.get("projectName") or project.get("lotName"))
-        )
-    )
-    report_title = (
-        f"{project_names[0]}招投标企业风险横向分析报告"
-        if len(project_names) == 1
-        else "本批次招投标项目企业风险横向分析报告"
-    )
     records = current_bid_records(projects)
     company_names = sorted({record["company_name"] for record in records})
+    cross_network_pair_count, common_project_analysis = cross_network_statistics(visible_risks)
     risk_items = []
     for index, risk in enumerate(visible_risks, start=1):
         relationships = [
@@ -609,16 +684,15 @@ def build_template_context(payload: dict[str, Any]) -> dict[str, Any]:
             }
         )
     context = {
-        "报告标题": report_title,
+        "报告标题": "惠山区高标准农田项目招投标企业风险横向分析报告",
         "生成时间": markdown_cell(payload.get("generatedAt")),
-        "运行标识": markdown_cell(payload.get("runId")),
         "投标项目数": len(projects),
         "投标企业数": int(summary.get("rootCompanyCount", len(company_names))),
         "投标记录数": len(records),
         "企业详情覆盖数": int(summary.get("matchedRootCompanyCount", 0)),
-        "相关企业数量": int(summary.get("relatedCompanyCount", 0)),
-        "企业关系记录数": int(summary.get("relationCount", 0)),
         "风险线索总数": len(visible_risks),
+        "跨网络参与投标企业对数量": cross_network_pair_count,
+        "共同项目分析": common_project_analysis,
         "爬虫数据状态": (
             "临时结果（待对账）"
             if summary.get("crawlFinality") == "provisional"
@@ -626,10 +700,7 @@ def build_template_context(payload: dict[str, Any]) -> dict[str, Any]:
         ),
         "爬虫覆盖提示": markdown_cell(summary.get("crawlCoverageNotice", "当前已完成风险分析。")),
         "项目行": project_rows,
-        "参与投标企业行": [
-            {"序号": index, "企业名称": markdown_cell(name)}
-            for index, name in enumerate(company_names, start=1)
-        ],
+        "参与投标企业行": two_column_name_rows(company_names),
         "风险类型统计行": [
             {"风险类别": RISK_TYPE_LABELS[risk_type], "风险线索数": risk_counts.get(risk_type, 0)}
             for risk_type in RISK_TYPE_ORDER

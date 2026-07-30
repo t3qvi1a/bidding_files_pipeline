@@ -834,28 +834,31 @@ def run_pipeline(
 
 def default_report_renderer() -> Path:
     """
-    【函数功能】定位工作区相邻风险报告项目中的现有 Markdown 转 PDF 脚本。
+    【函数功能】定位 Pipeline 风险报告适配版 Markdown 转 PDF 脚本。
     :return: Path，默认报告渲染脚本路径
     :Author: gexinyan
-    :CreateTime: 2026-07-16 16:20:00
+    :CreateTime: 2026-07-30 18:10:00
     Example: default_report_renderer()
     """
-    return Path(__file__).resolve().parents[2] / "bidding_files_risk_reports" / "expanded_risk_report_md_to_pdf.py"
+    return (
+        Path(__file__).resolve().parents[2]
+        / "bidding_files_risk_reports"
+        / "pipeline_relationship_report_md_to_pdf.py"
+    )
 
 
 def default_report_template() -> Path:
     """
-    【函数功能】定位基于现有风险报告样式创建的 Pipeline Markdown 模板。
+    【函数功能】定位 Pipeline 风险报告适配版 Markdown 模板。
     :return: Path，默认风险报告模板路径
     :Author: gexinyan
-    :CreateTime: 2026-07-16 16:20:00
+    :CreateTime: 2026-07-30 18:10:00
     Example: default_report_template()
     """
     return (
         Path(__file__).resolve().parents[2]
         / "bidding_files_risk_reports"
-        / "expand_risk_reports"
-        / "pipeline_risk_reports_template.md"
+        / "pipeline_relationship_risk_report_template.md"
     )
 
 
