@@ -239,6 +239,36 @@ class ReportingTests(unittest.TestCase):
             [row["项目名称"] for item in context["久投不中企业条目"] for row in item["项目明细行"]],
         )
 
+    def test_report_project_names_remove_huishan_without_mutating_payload(self) -> None:
+        """
+        【方法功能】验证报告展示脱敏项目名称且不修改当前任务和历史项目原始数据。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-30 18:30:00
+        """
+        historical = [
+            {
+                "projectName": "惠山区历史共同项目",
+                "bidders": ["企业A", "企业B"],
+                "awardedCompanies": ["企业B"],
+            }
+        ]
+        payload = sample_payload(
+            [risk_record("shared_email", "risk@example.com", "privacy", historical)]
+        )
+        payload["projects"][0]["projectName"] = "惠山区当前任务项目"
+
+        context = build_template_context(payload)
+        current_project_name = context["项目行"][0]["项目名称"]
+        historical_project_name = context["风险问题条目"][0]["共同项目行"][0]["共同参与项目"]
+
+        self.assertEqual("惠山区当前任务项目", payload["projects"][0]["projectName"])
+        self.assertEqual("惠山区历史共同项目", historical[0]["projectName"])
+        self.assertNotIn("惠山区", current_project_name)
+        self.assertNotIn("惠山区", historical_project_name)
+        self.assertIn("当前任务项目", current_project_name)
+        self.assertIn("历史共同项目", historical_project_name)
+
     def test_template_renders_relationship_evidence_history_and_no_placeholders(self) -> None:
         """
         【方法功能】验证新版模板展示关联关系、原始证据、历史项目且无残留占位符。

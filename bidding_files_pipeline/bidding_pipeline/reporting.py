@@ -49,6 +49,7 @@ EVIDENCE_SOURCE_LABELS = {
 RISK_COMPANY_COLOR = "#8B0000"
 WINNING_COMPANY_COLOR = "#1D4ED8"
 RISK_WINNING_COMPANY_COLOR = "#15803D"
+PROJECT_NAME_REDACTIONS = ("惠山区",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,9 +284,24 @@ def project_display_name(project: dict[str, Any]) -> str:
     :CreateTime: 2026-07-30 16:25:19
     Example: project_display_name({"projectName": "项目A", "lotCode": "L1"})
     """
-    project_name = normalize_text(project.get("projectName") or project.get("lotName"), "未披露项目")
+    project_name = report_project_name(project.get("projectName") or project.get("lotName"))
     lot_code = normalize_text(project.get("lotCode"))
     return f"{project_name}（标段：{lot_code}）" if lot_code else project_name
+
+
+def report_project_name(value: Any) -> str:
+    """
+    【函数功能】仅在风险报告展示阶段移除项目名称中的隐私区域词。
+    :param value: Any，数据库或风险 JSON 中的原始项目名称
+    :return: str，已脱敏且可用于报告展示的项目名称
+    :Author: gexinyan
+    :CreateTime: 2026-07-30 18:30:00
+    Example: report_project_name("惠山区项目A")
+    """
+    project_name = normalize_text(value, "未披露项目")
+    for redacted_text in PROJECT_NAME_REDACTIONS:
+        project_name = project_name.replace(redacted_text, "")
+    return normalize_text(project_name, "未披露项目")
 
 
 def current_bid_records(projects: Sequence[dict[str, Any]]) -> list[dict[str, str]]:
