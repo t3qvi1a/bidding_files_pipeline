@@ -180,14 +180,14 @@ class ReportingTests(unittest.TestCase):
 
     def test_report_title_is_fixed_for_all_task_scopes(self) -> None:
         """
-        【方法功能】验证新版报告始终使用惠山区高标准农田固定标题。
+        【方法功能】验证新版报告始终使用固定的招投标风险分析标题。
         :return: None
         :Author: gexinyan
         :CreateTime: 2026-07-30 16:25:19
         """
         payload = sample_payload([])
         self.assertEqual(
-            "惠山区高标准农田项目招投标企业风险横向分析报告",
+            "招投标风险分析报告",
             build_template_context(payload)["报告标题"],
         )
         payload["projects"].append(
@@ -199,7 +199,7 @@ class ReportingTests(unittest.TestCase):
             }
         )
         self.assertEqual(
-            "惠山区高标准农田项目招投标企业风险横向分析报告",
+            "招投标风险分析报告",
             build_template_context(payload)["报告标题"],
         )
 
@@ -267,7 +267,7 @@ class ReportingTests(unittest.TestCase):
             build_template_context(payload),
         )
 
-        self.assertIn("惠山区高标准农田项目招投标企业风险横向分析报告", rendered)
+        self.assertIn("招投标风险分析报告", rendered)
         self.assertIn("固定电话相同", rendered)
         self.assertIn("两家公司的股东相同，名称为**张三**", rendered)
         self.assertIn("企业工商详情", rendered)

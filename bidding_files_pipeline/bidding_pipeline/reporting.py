@@ -684,7 +684,7 @@ def build_template_context(payload: dict[str, Any]) -> dict[str, Any]:
             }
         )
     context = {
-        "报告标题": "惠山区高标准农田项目招投标企业风险横向分析报告",
+        "报告标题": "招投标风险分析报告",
         "生成时间": markdown_cell(payload.get("generatedAt")),
         "投标项目数": len(projects),
         "投标企业数": int(summary.get("rootCompanyCount", len(company_names))),
