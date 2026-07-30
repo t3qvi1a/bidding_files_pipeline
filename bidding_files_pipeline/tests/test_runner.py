@@ -25,6 +25,8 @@ from bidding_pipeline.runner import (
     PipelineConfig,
     build_crawl_audit,
     build_spider_statistics,
+    default_report_renderer,
+    default_report_template,
     reconcile_output,
     run_pipeline,
 )
@@ -37,6 +39,21 @@ class RunnerTests(unittest.TestCase):
     :Author: gexinyan
     :CreateTime: 2026-07-16 10:00:00
     """
+
+    def test_default_report_assets_use_new_version_and_keep_public_output_contract(self) -> None:
+        """
+        【方法功能】验证 Runner 默认使用新版报告资源且资源文件真实存在。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-30 16:25:19
+        """
+        renderer = default_report_renderer()
+        template = default_report_template()
+
+        self.assertEqual("pipeline_relationship_report_md_to_pdf.py", renderer.name)
+        self.assertEqual("pipeline_relationship_risk_report_template.md", template.name)
+        self.assertTrue(renderer.is_file())
+        self.assertTrue(template.is_file())
 
     def test_pending_spider_results_are_not_counted_as_failures(self) -> None:
         """
