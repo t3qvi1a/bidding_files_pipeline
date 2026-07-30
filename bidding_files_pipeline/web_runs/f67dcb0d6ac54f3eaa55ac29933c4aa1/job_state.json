@@ -46,6 +46,7 @@
   "categories": [],
   "forceOcr": false,
   "skipExistingCompanyInfo": false,
+  "fastCompanyTimeout": false,
   "inputSummary": "",
   "spiderRuns": [],
   "remoteCancellation": {}

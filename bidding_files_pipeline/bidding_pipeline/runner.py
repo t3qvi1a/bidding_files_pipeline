@@ -57,6 +57,7 @@ class PipelineConfig:
         report_template: Path | None，风险报告 Markdown 模板路径
         report_renderer: Path | None，现有 Markdown 转 PDF 脚本路径
         skip_existing_company_info: bool，是否复用数据库已有有效工商信息
+        fast_company_timeout: bool，是否将单企业外部获取总时限限制为 20 秒
         skip_spider: bool，是否跳过外部爬虫
         skip_risk_analysis: bool，是否跳过风险分析和报告生成
         dry_run: bool，是否跳过爬虫和数据库写入
@@ -81,6 +82,7 @@ class PipelineConfig:
     report_template: Path | None = None
     report_renderer: Path | None = None
     skip_existing_company_info: bool = False
+    fast_company_timeout: bool = False
     skip_spider: bool = False
     skip_risk_analysis: bool = False
     dry_run: bool = False
@@ -286,10 +288,12 @@ def pipeline_config_to_dict(config: PipelineConfig) -> dict[str, Any]:
             "fetchDeepInfo": config.spider.fetch_deep_info,
             "fetchBiddingDetail": config.spider.fetch_bidding_detail,
             "relationExpansionDepth": config.spider.relation_expansion_depth,
+            "failOnMaxPollTimeout": config.spider.fail_on_max_poll_timeout,
         },
         "reportRenderer": str(config.report_renderer) if config.report_renderer else None,
         "reportTemplate": str(config.report_template) if config.report_template else None,
         "skipExistingCompanyInfo": config.skip_existing_company_info,
+        "fastCompanyTimeout": config.fast_company_timeout,
         "skipSpider": config.skip_spider,
         "skipRiskAnalysis": config.skip_risk_analysis,
         "dryRun": config.dry_run,
@@ -836,11 +840,7 @@ def default_report_renderer() -> Path:
     :CreateTime: 2026-07-16 16:20:00
     Example: default_report_renderer()
     """
-    return (
-        Path(__file__).resolve().parents[2]
-        / "bidding_files_risk_reports"
-        / "pipeline_relationship_report_md_to_pdf.py"
-    )
+    return Path(__file__).resolve().parents[2] / "bidding_files_risk_reports" / "expanded_risk_report_md_to_pdf.py"
 
 
 def default_report_template() -> Path:
@@ -854,7 +854,8 @@ def default_report_template() -> Path:
     return (
         Path(__file__).resolve().parents[2]
         / "bidding_files_risk_reports"
-        / "pipeline_relationship_risk_report_template.md"
+        / "expand_risk_reports"
+        / "pipeline_risk_reports_template.md"
     )
 
 
@@ -883,9 +884,18 @@ def _build_dispatcher(
         )
     verifier_config = replace(config.database, database=config.spider_result_database, table="spider_data_company")
     data_verifier = SpiderDataVerifier(verifier_config)
+    spider_config = config.spider
+    if config.fast_company_timeout:
+        spider_config = replace(
+            spider_config,
+            max_poll_seconds=20.0,
+            retryable_run_attempts=0,
+            retry_delays=(),
+            fail_on_max_poll_timeout=True,
+        )
     return CrawlDispatcher(
         SpiderClient(
-            config.spider,
+            spider_config,
             verifier=data_verifier.verify,
             run_submitted_callback=spider_run_submitted_callback,
             cancel_requested=cancel_requested,

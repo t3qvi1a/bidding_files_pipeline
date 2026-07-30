@@ -50,6 +50,7 @@
   ],
   "forceOcr": true,
   "skipExistingCompanyInfo": false,
+  "fastCompanyTimeout": false,
   "inputSummary": "服务器目录：bidding_files",
   "spiderRuns": [],
   "remoteCancellation": {}

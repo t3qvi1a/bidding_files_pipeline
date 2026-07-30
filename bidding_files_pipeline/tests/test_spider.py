@@ -530,7 +530,66 @@ class SpiderTests(unittest.TestCase):
         :CreateTime: 2026-07-21 14:30:00
         """
         self.assertEqual(clean_company_name("费率)江阴市水利工程公司"), ("江阴市水利工程公司", "rate_parenthesis"))
+        self.assertEqual(
+            clean_company_name("投标报价(元)山东水利建设集团有限公司"),
+            ("山东水利建设集团有限公司", "bid_price_unit"),
+        )
         self.assertEqual(clean_company_name("企业A"), ("企业A", ""))
+
+    def test_fast_company_timeout_marks_root_failed_and_requests_remote_cancel(self) -> None:
+        """
+        【方法功能】验证快速模式达到单企业轮询上限后停止等待并异步请求取消远程运行。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-30 17:30:00
+        """
+        current = [0.0]
+
+        def monotonic() -> float:
+            """
+            【函数功能】返回可由模拟等待推进的单调时间。
+            :return: float，当前模拟时间
+            :Author: gexinyan
+            :CreateTime: 2026-07-30 17:30:00
+            """
+            return current[0]
+
+        def sleep(seconds: float) -> None:
+            """
+            【函数功能】推进模拟轮询时间而不进行实际等待。
+            :param seconds: float，待推进的秒数
+            :return: None
+            :Author: gexinyan
+            :CreateTime: 2026-07-30 17:30:00
+            """
+            current[0] += seconds
+
+        client = SpiderClient(
+            SpiderConfig(
+                "http://spider",
+                poll_interval_seconds=5,
+                max_poll_seconds=20,
+                retry_delays=(),
+                fail_on_max_poll_timeout=True,
+            ),
+            sleep=sleep,
+            monotonic=monotonic,
+        )
+        running = HttpResult(
+            200,
+            "",
+            {"data": {"status": "RUNNING", "expansionStatus": "RUNNING", "roots": [{"companyName": "企业A", "status": "RUNNING"}]}},
+        )
+        empty_queue = HttpResult(200, "", {"data": {"total": 0, "items": []}})
+        with (
+            patch.object(client, "_request", side_effect=[item for _ in range(4) for item in (running, empty_queue)]),
+            patch.object(client, "_request_run_cancel_async") as cancel_mock,
+        ):
+            results = client._poll_run("a.pdf", ["企业A"], "企业A", "run-1", 1)
+
+        self.assertEqual(results[0].status, "failed")
+        self.assertIn("company_task_timeout_20_seconds", results[0].message)
+        cancel_mock.assert_called_once_with("run-1")
 
     def test_static_run_becomes_pending_instead_of_failed(self) -> None:
         """

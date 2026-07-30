@@ -170,6 +170,10 @@ async function submitJob(event) {
     "skip_existing_company_info",
     byId("skip-existing-company-info").checked ? "true" : "false",
   );
+  data.append(
+    "fast_company_timeout",
+    byId("fast-company-timeout").checked ? "true" : "false",
+  );
   byId("start-button").disabled = true;
   try {
     const response = await fetch("/api/jobs", { method: "POST", body: data });
@@ -416,7 +420,9 @@ function renderSpiderProgress(progress) {
   const pending = Math.max(0, (Number(root.pending) || 0) + (Number(related.pending) || 0));
   const existing = Math.max(0, (Number(root.existing) || 0) + (Number(related.existing) || 0));
   const existingDataOnly = phase === "existing_data_only";
+  const spiderFinished = phase === "completed" || existingDataOnly || phase === "failed";
   const displayPercent = existingDataOnly ? 100 : percent;
+  const displayRelatedPercent = spiderFinished ? 100 : relatedPercent;
   let detail = `已完成工商信息获取 ${completed} / 已发现企业 ${discovered} 家 · 正在处理 ${running} 家 · 失败 ${failed} 家 · 待核验 ${pending} 家 · 数据已存在 ${existing} 家企业`;
   if (discovered === 0 && phase === "waiting_for_companies") {
     detail = "等待文件解析完成，尚未发现企业";
@@ -431,10 +437,17 @@ function renderSpiderProgress(progress) {
   byId("root-progress-value").textContent = `${rootPercent}%`;
   byId("root-progress-bar").style.width = `${rootPercent}%`;
   byId("root-progress-detail").textContent = `参与投标企业：${rootTotal} 家｜已完成：${Number(root.success) || 0}｜失败：${Number(root.failed) || 0}｜待核验：${Number(root.pending) || 0}｜已有数据：${Number(root.existing) || 0}`;
-  byId("related-progress-value").textContent = `${relatedPercent}%`;
-  byId("related-progress-bar").style.width = `${relatedPercent}%`;
-  byId("related-progress-detail").textContent = `已发现相关企业：${relatedTotal} 家｜已完成：${Number(related.success) || 0}｜失败：${Number(related.failed) || 0}｜待核验：${Number(related.pending) || 0}｜已有数据：${Number(related.existing) || 0}`;
-  byId("expansion-status-detail").textContent = `关系扩展状态：${formatExpansionStatus(current.expansionStatus)}`;
+  byId("related-progress-value").textContent = `${displayRelatedPercent}%`;
+  byId("related-progress-bar").style.width = `${displayRelatedPercent}%`;
+  const expansionStatus = current.expansionStatus || "WAITING";
+  if (spiderFinished && relatedTotal === 0) {
+    byId("related-progress-detail").textContent = expansionStatus === "FAILED" ?
+      "未发现可处理的相关企业，关联关系扩展已失败并结束" :
+      "未发现可处理的相关企业，关联关系扩展已结束";
+  } else {
+    byId("related-progress-detail").textContent = `已发现相关企业：${relatedTotal} 家｜已完成：${Number(related.success) || 0}｜失败：${Number(related.failed) || 0}｜待核验：${Number(related.pending) || 0}｜已有数据：${Number(related.existing) || 0}`;
+  }
+  byId("expansion-status-detail").textContent = `关系扩展状态：${formatExpansionStatus(expansionStatus)}`;
   byId("related-progress-section").classList.toggle("hidden", existingDataOnly);
 }
 

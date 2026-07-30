@@ -80,6 +80,10 @@
             <span><strong>不覆盖已有工商信息</strong><small>已有有效工商信息的参与投标企业将直接使用数据库现有数据</small></span>
             <input id="skip-existing-company-info" name="skip_existing_company_info" type="checkbox">
           </label>
+          <label class="toggle-row">
+            <span><strong>快速结束慢任务</strong><small>单家外部工商信息获取超过 20 秒时自动结束，并继续后续分析</small></span>
+            <input id="fast-company-timeout" name="fast_company_timeout" type="checkbox">
+          </label>
         </div>
       </div>
 
@@ -155,6 +159,6 @@
   </main>
 
   <footer>JWmath · 招投标智能分析 · 风险结果仅供辅助审查</footer>
-  <script src="/static/app.js?v=20260730-6" defer></script>
+  <script src="/static/app.js?v=20260730-7" defer></script>
 </body>
 </html>

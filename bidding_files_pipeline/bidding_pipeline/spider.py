@@ -36,6 +36,7 @@ COMPANY_SUFFIXES = ("公司", "集团", "企业", "事务所", "中心")
 COMPANY_PREFIX_PATTERNS = (
     ("rate_parenthesis", re.compile(r"^\s*费率\s*[)）]\s*")),
     ("quoted_rate", re.compile(r"^\s*报价费率\s*[:：]\s*")),
+    ("bid_price_unit", re.compile(r"^\s*投标报价\s*[（(]\s*元\s*[)）]\s*[:：]?\s*")),
     ("bid_price", re.compile(r"^\s*投标报价\s*[:：]\s*")),
     ("discount_rate", re.compile(r"^\s*下浮率\s*[:：]\s*")),
 )
@@ -129,6 +130,7 @@ class SpiderConfig:
         fetch_deep_info: bool，是否采集企业深度信息
         fetch_bidding_detail: bool，是否采集招投标详情
         relation_expansion_depth: int，企业关联关系扩展层数
+        fail_on_max_poll_timeout: bool，达到轮询上限后是否直接结束本地企业任务
     :Author: gexinyan
     :CreateTime: 2026-07-16 10:00:00
     """
@@ -146,6 +148,7 @@ class SpiderConfig:
     fetch_deep_info: bool = False
     fetch_bidding_detail: bool = False
     relation_expansion_depth: int = 1
+    fail_on_max_poll_timeout: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1203,6 +1206,40 @@ class SpiderClient:
             if self._is_cancel_requested():
                 break
             if self.config.max_poll_seconds > 0 and now - start_time >= self.config.max_poll_seconds:
+                if self.config.fail_on_max_poll_timeout:
+                    self._request_run_cancel_async(run_id)
+                    if latest is not None:
+                        return self._finalize_run_results(
+                            latest,
+                            attempts,
+                            poll_count,
+                            unresolved_status="failed",
+                            unresolved_message=(
+                                f"company_task_timeout_{int(self.config.max_poll_seconds)}_seconds"
+                            ),
+                            submission_time=submission_time,
+                            last_progress_time=last_progress_text,
+                        )
+                    return [
+                        SpiderTaskResult(
+                            source_pdf,
+                            name,
+                            keyword,
+                            "failed",
+                            f"company_task_timeout_{int(self.config.max_poll_seconds)}_seconds",
+                            attempts,
+                            poll_count,
+                            run_id=run_id,
+                            company_type="root",
+                            raw_status="LOCAL_TIMEOUT",
+                            expansion_status="FAILED",
+                            submission_time=submission_time,
+                            last_progress_time=last_progress_text,
+                            original_company_name=name,
+                            submitted_company_name=name,
+                        )
+                        for name in root_names
+                    ]
                 break
             response, _ = self._request_with_retry(self._run_url(run_id), "GET", None)
             poll_count += 1
@@ -1268,6 +1305,28 @@ class SpiderClient:
             )
             for name in root_names
         ]
+
+    def _request_run_cancel_async(self, run_id: str) -> None:
+        """
+        【方法功能】在本地企业任务超时后异步发送远程运行取消请求，避免取消等待阻塞后续流程。
+        :param run_id: str，待取消的外部工商信息获取运行标识
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-30 17:25:00
+        Example: client._request_run_cancel_async("run-1")
+        """
+        normalized_run_id = normalize_text(run_id)
+        if not normalized_run_id:
+            return
+        threading.Thread(
+            target=lambda: self._request(
+                self._run_url(normalized_run_id) + "/cancel",
+                "POST",
+                None,
+            ),
+            name=f"bidding-spider-timeout-cancel-{normalized_run_id[:8]}",
+            daemon=True,
+        ).start()
 
     def _read_run_queue(self, run_id: str) -> list[dict[str, Any]]:
         """
@@ -1859,7 +1918,12 @@ class CrawlDispatcher:
         if self._is_cancel_requested():
             return
         source_pdf = str(document.pdf_path)
-        names = [name for name in extract_company_names(document.records) if self._mark_new_name(name)]
+        names = []
+        for original_name in extract_company_names(document.records):
+            cleaned_name, _ = clean_company_name(original_name)
+            candidate_name = cleaned_name or original_name
+            if self._mark_new_name(candidate_name):
+                names.append(candidate_name)
         if not names:
             self._emit_progress()
             return

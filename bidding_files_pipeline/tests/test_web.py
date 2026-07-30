@@ -103,6 +103,7 @@ class WebSecurityTests(unittest.TestCase):
         self.assertIn('id="root-progress-bar"', response.text)
         self.assertIn('id="related-progress-bar"', response.text)
         self.assertIn('id="skip-existing-company-info"', response.text)
+        self.assertIn('id="fast-company-timeout"', response.text)
 
     def test_create_job_accepts_skip_existing_company_info_form_parameter(self) -> None:
         """
@@ -130,13 +131,16 @@ class WebSecurityTests(unittest.TestCase):
                             "local_path": str(input_dir),
                             "category_mode": "all",
                             "skip_existing_company_info": "true",
+                            "fast_company_timeout": "true",
                         },
                     )
 
             self.assertEqual(response.status_code, 202)
             payload = response.json()
             self.assertTrue(payload["skipExistingCompanyInfo"])
+            self.assertTrue(payload["fastCompanyTimeout"])
             self.assertTrue(manager.get_job(payload["jobId"]).skip_existing_company_info)
+            self.assertTrue(manager.get_job(payload["jobId"]).fast_company_timeout)
             manager.executor.shutdown(wait=False, cancel_futures=True)
 
 
@@ -357,6 +361,7 @@ class WebJobStateTests(unittest.TestCase):
                 categories=("award_notice",),
                 force_ocr=True,
                 skip_existing_company_info=True,
+                fast_company_timeout=True,
                 input_summary="服务器目录：input",
             )
             manager.jobs[job.job_id] = job
@@ -370,7 +375,9 @@ class WebJobStateTests(unittest.TestCase):
             self.assertEqual(restored.categories, ("award_notice",))
             self.assertTrue(restored.force_ocr)
             self.assertTrue(restored.skip_existing_company_info)
+            self.assertTrue(restored.fast_company_timeout)
             self.assertTrue(response["skipExistingCompanyInfo"])
+            self.assertTrue(response["fastCompanyTimeout"])
             self.assertTrue(response["canRetry"])
             self.assertEqual(response["inputSummary"], "服务器目录：input")
             restored_manager.executor.shutdown(wait=False, cancel_futures=True)
@@ -397,6 +404,7 @@ class WebJobStateTests(unittest.TestCase):
                 category_mode="exclude",
                 categories=("archive_info",),
                 skip_existing_company_info=True,
+                fast_company_timeout=True,
                 input_summary="服务器目录：input",
             )
             manager.jobs[source_job.job_id] = source_job
@@ -409,6 +417,7 @@ class WebJobStateTests(unittest.TestCase):
             self.assertEqual(retried.categories, ("archive_info",))
             self.assertEqual(retried.source_mode, "local")
             self.assertTrue(retried.skip_existing_company_info)
+            self.assertTrue(retried.fast_company_timeout)
             submit.assert_called_once()
             manager.executor.shutdown(wait=False, cancel_futures=True)
 
