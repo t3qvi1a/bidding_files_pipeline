@@ -829,17 +829,26 @@ def build_table_col_widths(
             available_width * 0.38,
             available_width * 0.18,
         ]
-    if clean_headers == [
-        "共同参与项目",
-        "所有参与企业",
-        "各参与投标企业投标结果",
-        "项目中标企业",
-    ]:
+    # 历史共同参投补充证据表按报告版式指定列宽，最后 1% 留作表格外侧间距。
+    if clean_headers in (
+        [
+            "共同参与项目",
+            "所有参与企业",
+            "各参与企业投标结果",
+            "项目中标企业",
+        ],
+        [
+            "共同参与项目",
+            "所有参与企业",
+            "各参与投标企业投标结果",
+            "项目中标企业",
+        ],
+    ):
         return [
             available_width * 0.20,
-            available_width * 0.29,
-            available_width * 0.34,
-            available_width * 0.16,
+            available_width * 0.35,
+            available_width * 0.30,
+            available_width * 0.14,
         ]
     if clean_headers == ["字段", "内容"] and len(column_widths) == 2:
         target_width = min(max(58.0, available_width * 0.12), available_width * 0.20)

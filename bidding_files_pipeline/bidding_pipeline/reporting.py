@@ -548,6 +548,7 @@ def historical_project_rows(risk: dict[str, Any]) -> list[dict[str, str]]:
         winners = {
             normalize_text(name) for name in project.get("awardedCompanies", []) if normalize_text(name)
         }
+        risk_bidders = sorted(bidders & risk_companies)
         rows.append(
             {
                 "共同参与项目": markdown_cell(project_display_name(project)),
@@ -557,8 +558,8 @@ def historical_project_rows(risk: dict[str, Any]) -> list[dict[str, str]]:
                 "投标结果": "<br/>".join(
                     f"{format_company_name(name, risk_companies, winners)}："
                     f"{'中标' if name in winners else '未中标'}"
-                    for name in sorted(bidders)
-                ) or "未识别",
+                    for name in risk_bidders
+                ) or "未识别涉及风险的投标企业",
                 "项目中标企业": "、".join(
                     format_company_name(name, risk_companies, winners) for name in sorted(winners)
                 ) or "未识别中标企业",

@@ -269,6 +269,34 @@ class ReportingTests(unittest.TestCase):
         self.assertIn("当前任务项目", current_project_name)
         self.assertIn("历史共同项目", historical_project_name)
 
+    def test_historical_bid_results_only_list_risk_companies(self) -> None:
+        """
+        【方法功能】验证历史共同参投结果仅展示风险企业及其红色或绿色标注。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-31 10:00:00
+        """
+        historical = [
+            {
+                "projectName": "历史共同项目",
+                "bidders": ["企业A", "企业B", "非风险企业D"],
+                "awardedCompanies": ["企业B", "非风险企业D"],
+            }
+        ]
+        context = build_template_context(
+            sample_payload([risk_record("shared_email", "risk@example.com", "history", historical)])
+        )
+        row = context["风险问题条目"][0]["共同项目行"][0]
+
+        self.assertIn("企业A", row["投标结果"])
+        self.assertIn("企业B", row["投标结果"])
+        self.assertNotIn("非风险企业D", row["投标结果"])
+        self.assertIn('color:#8B0000', row["投标结果"])
+        self.assertIn('color:#15803D', row["投标结果"])
+        self.assertNotIn('color:#1D4ED8', row["投标结果"])
+        self.assertIn("非风险企业D", row["所有参与企业"])
+        self.assertIn("非风险企业D", row["项目中标企业"])
+
     def test_template_renders_relationship_evidence_history_and_no_placeholders(self) -> None:
         """
         【方法功能】验证新版模板展示关联关系、原始证据、历史项目且无残留占位符。
