@@ -519,10 +519,13 @@ def bid_statistics(records: Sequence[dict[str, str]]) -> dict[str, Any]:
         )
     return {
         "存在久投不中企业": bool(long_term_losers),
+        "无久投不中企业": not long_term_losers,
         "久投不中企业条目": company_entries(long_term_losers),
         "存在高中标率企业": bool(high_win_rate),
+        "无高中标率企业": not high_win_rate,
         "高中标率企业条目": company_entries(high_win_rate),
         "存在疑似陪标企业": bool(suspected_groups),
+        "无疑似陪标企业": not suspected_groups,
         "疑似陪标企业条目": suspected_groups,
     }
 

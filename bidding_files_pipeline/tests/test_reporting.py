@@ -385,6 +385,26 @@ class ReportingTests(unittest.TestCase):
         self.assertTrue(context["无风险"])
         self.assertEqual([], context["风险问题条目"])
 
+    def test_empty_bid_statistics_render_threshold_notice_for_each_section(self) -> None:
+        """
+        【方法功能】验证三类投标行为统计未命中阈值时均展示明确提示。
+        :return: None
+        :Author: gexinyan
+        :CreateTime: 2026-07-31 09:30:00
+        """
+        template_path = (
+            repository_root()
+            / "bidding_files_risk_reports"
+            / "pipeline_relationship_risk_report_template.md"
+        )
+        rendered = render_template(
+            template_path.read_text(encoding="utf-8"),
+            build_template_context(sample_payload([])),
+        )
+        notice = "当前任务暂无满足统计阈值的企业/企业组合。"
+        self.assertEqual(3, rendered.count(notice))
+        self.assertNotIn("{{", rendered)
+
     def test_invalid_payload_is_rejected_before_rendering(self) -> None:
         """
         【方法功能】验证缺少必需列表的风险 JSON 在模板渲染前被拒绝。
